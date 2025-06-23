@@ -31,7 +31,7 @@ default = []
 stream = ["futures", "async-stream", "voice_activity_detector"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
-ort = { version = "2.0.0-rc.9", features = ["coreml", "ndarray", "load-dynamic"] }
+ort = { version = "2.0.0-rc.10", features = ["coreml", "ndarray", "load-dynamic"] }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 ort = { version = "2.0.0-rc.9", features = ["ndarray", "load-dynamic"] }
