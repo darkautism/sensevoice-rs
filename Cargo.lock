@@ -2372,13 +2372,14 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "voice_activity_detector"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a78926100321e74c3d74d389e875f26f395b71528f8ea8b7b505c7f31063dcf3"
+checksum = "50407ebe9f37f46ee5d9a7a4228324f400439de9c62861273ab34bcfbdaf08b6"
 dependencies = [
  "futures",
  "ndarray",
  "ort",
+ "ort-sys",
  "pin-project",
  "thiserror 2.0.11",
  "typed-builder",
