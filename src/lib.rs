@@ -307,15 +307,22 @@ impl SenseVoiceSmallError {
 
 /// Helper function to check if the current environment is RKNPU.
 ///
-/// Checks for the existence of the RKNPU debug directory.
-/// 檢查是否為 RKNPU 環境
+/// Checks for the existence of the RKNPU debug directory and if it contains any files.
+/// 檢查是否為 RKNPU 環境 (檢查路徑存在且有內容)
 fn is_rknpu() -> bool {
     #[cfg(feature = "rknpu")]
     {
         // 僅在 Linux 且啟用 rknpu feature 時檢查路徑
         // Check path only on Linux with rknpu feature enabled
         if cfg!(target_os = "linux") {
-            std::path::Path::new("/sys/kernel/debug/rknpu/").exists()
+            let path = std::path::Path::new("/sys/kernel/debug/rknpu/");
+            if path.exists() {
+                 // Check if directory is not empty
+                 if let Ok(mut entries) = std::fs::read_dir(path) {
+                     return entries.next().is_some();
+                 }
+            }
+            false
         } else {
             false
         }
@@ -385,6 +392,7 @@ impl SenseVoiceSmall {
         vadconfig: VADXOptions,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         if is_rknpu() {
+            println!("RKNPU detected, initializing RKNN backend...");
             // RKNN Path
             #[cfg(feature = "rknpu")]
             {
@@ -465,6 +473,7 @@ impl SenseVoiceSmall {
                  unreachable!("is_rknpu() returned true but feature is disabled");
             }
         } else {
+            println!("RKNPU not detected (or feature disabled), initializing ONNX backend...");
             // ONNX Path
             // Use haixuantao/SenseVoiceSmall-onnx
             let model_repo = "haixuantao/SenseVoiceSmall-onnx";
