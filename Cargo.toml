@@ -12,7 +12,7 @@ license = "MIT"
 
 [dependencies]
 kaldi-fbank-rust-kautism = "0.1.0"
-rknn-rs = "0.1.2"
+rknn-rs = { version = "0.1.2", optional = true }
 hound = "3.5.1"
 ndarray = { version="0.16.1", features=["rayon"]}
 ndarray-npy = "0.9.1"
@@ -24,14 +24,12 @@ regex = "1.11.1"
 voice_activity_detector = { version = "0.2.1", optional = true }
 futures = { version = "0.3.31", optional = true }
 async-stream = { version = "0.3.6", optional = true }
-
+ort = { version = "2.0.0-rc.10", features = ["ndarray", "load-dynamic"] }
 
 [features]
 default = []
 stream = ["futures", "async-stream", "voice_activity_detector"]
+rknpu = ["dep:rknn-rs"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 ort = { version = "2.0.0-rc.10", features = ["coreml", "ndarray", "load-dynamic"] }
-
-[target.'cfg(not(target_os = "macos"))'.dependencies]
-ort = { version = "2.0.0-rc.10", features = ["ndarray", "load-dynamic"] }
