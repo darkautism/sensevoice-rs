@@ -305,34 +305,6 @@ impl SenseVoiceSmallError {
     }
 }
 
-/// Helper function to check if the current environment is RKNPU.
-///
-/// Checks for the existence of the RKNPU debug directory and if it contains any files.
-/// 檢查是否為 RKNPU 環境 (檢查路徑存在且有內容)
-fn is_rknpu() -> bool {
-    #[cfg(feature = "rknpu")]
-    {
-        // 僅在 Linux 且啟用 rknpu feature 時檢查路徑
-        // Check path only on Linux with rknpu feature enabled
-        if cfg!(target_os = "linux") {
-            let path = std::path::Path::new("/sys/kernel/debug/rknpu/");
-            if path.exists() {
-                 // Check if directory is not empty
-                 if let Ok(mut entries) = std::fs::read_dir(path) {
-                     return entries.next().is_some();
-                 }
-            }
-            false
-        } else {
-            false
-        }
-    }
-    #[cfg(not(feature = "rknpu"))]
-    {
-        false
-    }
-}
-
 /// Represents the core structure for the SenseVoiceSmall speech recognition system.
 ///
 /// This structure manages components such as voice activity detection (VAD), automatic speech recognition (ASR),
@@ -376,10 +348,10 @@ pub struct SenseVoiceSmall {
 
 /// Implementation of methods for `SenseVoiceSmall`.
 impl SenseVoiceSmall {
-    /// Initializes a new `SenseVoiceSmall` instance by automatically detecting the environment.
+    /// Initializes a new `SenseVoiceSmall` instance.
     ///
-    /// If RKNPU is detected (and feature enabled), it loads the RKNN model.
-    /// Otherwise, it loads the ONNX model from Hugging Face.
+    /// If the `rknpu` feature is enabled, it initializes the RKNN backend using the default RKNN model.
+    /// Otherwise, it initializes the ONNX backend using the default ONNX model.
     ///
     /// # Arguments
     ///
@@ -391,89 +363,74 @@ impl SenseVoiceSmall {
     pub fn init(
         vadconfig: VADXOptions,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        if is_rknpu() {
-            println!("RKNPU detected, initializing RKNN backend...");
+        #[cfg(feature = "rknpu")]
+        {
+            println!("RKNPU feature enabled, initializing RKNN backend...");
             // RKNN Path
-            #[cfg(feature = "rknpu")]
-            {
-                // 使用官方 SenseVoiceSmall 的 hg (FunAudioLLM/SenseVoiceSmall) - user requirement changed this?
-                // Requirement 1: "Default please change to official SenseVoiceSmall hg (FunAudioLLM/SenseVoiceSmall)"
-                // But specifically for RKNN, Requirement 3 says "When rknpu starts ... use rknpu code".
-                // Existing code uses "happyme531/SenseVoiceSmall-RKNN2".
-                // User also said: "Change SenseVoiceSmall::init("happyme531/SenseVoiceSmall-RKNN2") to init".
-                // So for RKNN, we stick to the working RKNN model.
-                let model_path = "happyme531/SenseVoiceSmall-RKNN2";
+            let model_path = "happyme531/SenseVoiceSmall-RKNN2";
 
-                let api = Api::new().unwrap();
-                let repo = api.model(model_path.to_string());
+            let api = Api::new().unwrap();
+            let repo = api.model(model_path.to_string());
 
-                let fsmn_path = repo.get("fsmnvad-offline.onnx")?;
-                let embedding_path = repo.get("embedding.npy")?;
-                let rknn_path = repo.get("sense-voice-encoder.rknn")?;
-                let sentence_path = repo.get("chn_jpn_yue_eng_ko_spectok.bpe.model")?;
-                let fsmn_am_path = repo.get("fsmn-am.mvn")?;
-                let am_path = repo.get("am.mvn")?;
+            let fsmn_path = repo.get("fsmnvad-offline.onnx")?;
+            let embedding_path = repo.get("embedding.npy")?;
+            let rknn_path = repo.get("sense-voice-encoder.rknn")?;
+            let sentence_path = repo.get("chn_jpn_yue_eng_ko_spectok.bpe.model")?;
+            let fsmn_am_path = repo.get("fsmn-am.mvn")?;
+            let am_path = repo.get("am.mvn")?;
 
-                let config = SenseVoiceConfig {
-                    model_path: rknn_path,
-                    tokenizer_path: sentence_path,
-                    vad_model_path: Some(fsmn_path),
-                    vad_cmvn_path: Some(fsmn_am_path),
-                    cmvn_path: Some(am_path),
-                };
+            let config = SenseVoiceConfig {
+                model_path: rknn_path,
+                tokenizer_path: sentence_path,
+                vad_model_path: Some(fsmn_path),
+                vad_cmvn_path: Some(fsmn_am_path),
+                cmvn_path: Some(am_path),
+            };
 
-                // We need to pass the embedding path manually as it's not in the config struct yet?
-                // Or we can add it. But for now, let's keep the internal logic.
-                // Actually, init_with_config is better for unified logic, but RKNN needs embedding.npy which ONNX doesn't.
-                // Let's implement logic here directly for now.
+            let fsmn = Mutex::new(Some(FSMNVad::new(config.vad_model_path.as_ref().unwrap(), vadconfig)?));
 
-                let fsmn = Mutex::new(Some(FSMNVad::new(config.vad_model_path.as_ref().unwrap(), vadconfig)?));
+            let embedding_file = File::open(embedding_path)?;
+            let embedding_reader = BufReader::new(embedding_file);
+            let embedding: Array2<f32> = Array2::read_npy(embedding_reader)?;
+            assert_eq!(embedding.shape()[1], 560, "Embedding dimension must be 560");
 
-                let embedding_file = File::open(embedding_path)?;
-                let embedding_reader = BufReader::new(embedding_file);
-                let embedding: Array2<f32> = Array2::read_npy(embedding_reader)?;
-                assert_eq!(embedding.shape()[1], 560, "Embedding dimension must be 560");
+            let rknn = Rknn::rknn_init(config.model_path)?;
+            let spp = SentencePieceProcessor::open(config.tokenizer_path)?;
 
-                let rknn = Rknn::rknn_init(config.model_path)?;
-                let spp = SentencePieceProcessor::open(config.tokenizer_path)?;
+            let n_seq = 171;
 
-                let n_seq = 171;
+            let vad_frontend = WavFrontend::new(WavFrontendConfig {
+                lfr_m: 5,
+                cmvn_file: Some(config.vad_cmvn_path.as_ref().unwrap().to_str().unwrap().to_owned()),
+                ..Default::default()
+            })?;
 
-                let vad_frontend = WavFrontend::new(WavFrontendConfig {
-                    lfr_m: 5,
-                    cmvn_file: Some(config.vad_cmvn_path.as_ref().unwrap().to_str().unwrap().to_owned()),
-                    ..Default::default()
-                })?;
+            let asr_frontend = WavFrontend::new(WavFrontendConfig {
+                lfr_m: 7,
+                cmvn_file: Some(config.cmvn_path.as_ref().unwrap().to_str().unwrap().to_owned()),
+                ..Default::default()
+            })?;
 
-                let asr_frontend = WavFrontend::new(WavFrontendConfig {
-                    lfr_m: 7,
-                    cmvn_file: Some(config.cmvn_path.as_ref().unwrap().to_str().unwrap().to_owned()),
-                    ..Default::default()
-                })?;
+            #[cfg(feature = "stream")]
+            let silero_vad = VadProcessor::new(VadConfig::default())?;
 
+            Ok(SenseVoiceSmall {
+                vad_frontend,
+                asr_frontend,
+                n_seq,
+                spp,
+                rknn: Some(rknn),
+                embedding: Some(embedding),
+                ort_session: None,
+                fsmn,
                 #[cfg(feature = "stream")]
-                let silero_vad = VadProcessor::new(VadConfig::default())?;
-
-                Ok(SenseVoiceSmall {
-                    vad_frontend,
-                    asr_frontend,
-                    n_seq,
-                    spp,
-                    rknn: Some(rknn),
-                    embedding: Some(embedding),
-                    ort_session: None,
-                    fsmn,
-                    #[cfg(feature = "stream")]
-                    silero_vad,
-                    use_rknn: true,
-                })
-            }
-            #[cfg(not(feature = "rknpu"))]
-            {
-                 unreachable!("is_rknpu() returned true but feature is disabled");
-            }
-        } else {
-            println!("RKNPU not detected (or feature disabled), initializing ONNX backend...");
+                silero_vad,
+                use_rknn: true,
+            })
+        }
+        #[cfg(not(feature = "rknpu"))]
+        {
+            println!("RKNPU feature disabled, initializing ONNX backend...");
             // ONNX Path
             // Use haixuantao/SenseVoiceSmall-onnx
             let model_repo = "haixuantao/SenseVoiceSmall-onnx";
@@ -483,21 +440,6 @@ impl SenseVoiceSmall {
             let model_path = repo.get("model_quant.onnx")?;
             let tokenizer_path = repo.get("chn_jpn_yue_eng_ko_spectok.bpe.model")?;
             let am_path = repo.get("am.mvn")?;
-
-            // For VAD in ONNX mode:
-            // User said: "If it's ort, vad is not necessarily needed, can make a switch".
-            // "If non-RKNPU, use official FunAudioLLM/SenseVoiceSmall" (but we use haixuantao).
-            // haixuantao doesn't have VAD model.
-            // We can optionally check if we can download VAD model from elsewhere or skip it.
-            // Let's try to get VAD from happyme531 if we want to enable VAD by default, or just skip it if files are missing.
-            // However, user said "default please change to official SenseVoiceSmall hg".
-            // Since haixuantao is just the quantized model, maybe we should grab VAD from happyme531 or FunAudioLLM?
-            // FunAudioLLM/SenseVoiceSmall has `fsmnvad-offline.onnx`? Check earlier search...
-            // Search result for FunAudioLLM/SenseVoiceSmall didn't explicitly list files but it's likely there.
-            // Let's fallback to `happyme531` for VAD files if needed, or better, allow running without VAD.
-            // For `init`, we will try to enable VAD if possible to match existing behavior roughly.
-            // Let's assume we pull VAD from `happyme531` as a reliable source for now, or `FunAudioLLM`.
-            // To be safe and simple, let's use `happyme531` for VAD tools since we know they work with the codebase.
 
             let vad_repo_name = "happyme531/SenseVoiceSmall-RKNN2";
             let vad_repo = api.model(vad_repo_name.to_string());
@@ -530,28 +472,20 @@ impl SenseVoiceSmall {
         config: SenseVoiceConfig,
         vadconfig: VADXOptions,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        // Initialization logic for ONNX (or custom RKNN if we wanted to support it, but focus on ONNX for generic init)
-        // If the model path ends with .rknn and we are on RKNPU, we could try RKNN loading.
-        // But let's assume this manual config is primarily for the generic/ONNX path unless specified.
-        // The prompt says "init_with_file let user use local model".
-
-        let is_rknn_model = config.model_path.extension().map_or(false, |ext| ext == "rknn");
-
-        if is_rknn_model && is_rknpu() {
-             #[cfg(feature = "rknpu")]
-             {
-                 // RKNN manual loading logic (similar to init but using provided paths)
-                 // Note: RKNN needs embedding.npy which is not in SenseVoiceConfig.
-                 // We might need to extend SenseVoiceConfig or just fail if it's missing for RKNN.
-                 // For now, let's focus on the non-RKNN path as that's the main new feature.
-                 // If user provides .rknn, we can try to load it. But embedding is tricky.
-                 // Let's error out for now if .rknn is used with this generic config without embedding support.
+        #[cfg(feature = "rknpu")]
+        {
+             // If rknpu feature is enabled, we check if it is an RKNN model
+             let is_rknn_model = config.model_path.extension().map_or(false, |ext| ext == "rknn");
+             if is_rknn_model {
                  return Err("Manual loading of RKNN models via init_with_config is not fully supported yet (missing embedding path). Use init() for default RKNN model.".into());
              }
-             #[cfg(not(feature = "rknpu"))]
-             {
-                 return Err("RKNN model provided but rknpu feature is disabled.".into());
-             }
+             // If not RKNN model (e.g. ONNX), we could technically support it even with rknpu feature enabled,
+             // assuming dependencies allow it. However, `rknn` field in struct is Option, so we can set it to None.
+             // But existing struct has `#[cfg(feature = "rknpu")]` fields.
+             // We can proceed to ONNX loading below if we decide so, OR restrict it.
+             // Given "assume it is rknpu", maybe we should strictly expect RKNN?
+             // But the user might want to run ONNX on a device that also supports RKNN.
+             // Let's allow ONNX loading here if the model is not .rknn
         }
 
         // ONNX Loading
