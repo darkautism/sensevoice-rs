@@ -1,6 +1,6 @@
 [package]
 name = "sensevoice-rs"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "A Rust-based, SenseVoiceSmall "
 homepage = "https://github.com/darkautism/sensevoice-rs"
@@ -20,7 +20,7 @@ sentencepiece = "0.12.0"
 ndarray-stats = "0.6.0"
 rayon = "1.11.0"
 hf-hub = "0.4.3"
-regex = "1.11.1"
+regex = "1.12.2"
 voice_activity_detector = "0.2.1"
 futures = { version = "0.3.31", optional = true }
 async-stream = { version = "0.3.6", optional = true }

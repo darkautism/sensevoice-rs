@@ -709,7 +709,7 @@ impl SenseVoiceSmall {
         // 在 n_vocab 維度（Axis(1)）上取 argmax
         let token_ids: Vec<i32> = output_array
             .axis_iter(Axis(2)) // 沿著 n_seq=171 維度迭代
-            .into_par_iter()
+            .into_iter()
             .map(|slice| {
                 slice
                     .iter()
