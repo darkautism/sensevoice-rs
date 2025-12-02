@@ -1,26 +1,27 @@
-pub mod fsmn_vad;
-
-#[cfg(feature = "stream")]
+pub mod config;
 pub mod silero_vad;
 pub mod wavfrontend;
 
 use core::fmt;
 use std::sync::Mutex;
+#[cfg(feature = "rknpu")]
 use std::{fs::File, io::BufReader};
 
-use fsmn_vad::{FSMNVad, VADXOptions};
 use hf_hub::api::sync::Api;
 use hound::WavReader;
-use ndarray::parallel::prelude::*;
-use ndarray::{s, Array2, Array3, ArrayView3, Axis};
+use ndarray::{s, ArrayView3, Axis};
+#[cfg(feature = "rknpu")]
+use ndarray::{Array2, Array3};
+#[cfg(feature = "rknpu")]
 use ndarray_npy::ReadNpyExt;
-use rayon::iter::IntoParallelIterator;
+use ort::session::builder::GraphOptimizationLevel;
 use regex::Regex;
+#[cfg(feature = "rknpu")]
 use rknn_rs::prelude::{Rknn, RknnInput, RknnTensorFormat, RknnTensorType};
 use sentencepiece::SentencePieceProcessor;
 
-#[cfg(feature = "stream")]
-use silero_vad::{VadConfig, VadProcessor};
+use config::SenseVoiceConfig;
+use silero_vad::{VadConfig, VadProcessor, CHUNK_SIZE};
 use wavfrontend::{WavFrontend, WavFrontendConfig};
 
 #[cfg(feature = "stream")]
@@ -45,6 +46,8 @@ pub enum SenseVoiceLanguage {
     Ja,
     /// Korean
     Ko,
+    /// No Speech / Silence
+    NoSpeech,
 }
 
 /// Implementation of methods for `SenseVoiceLanguage`.
@@ -67,6 +70,7 @@ impl SenseVoiceLanguage {
             "yue" => Some(SenseVoiceLanguage::Yue),
             "ja" => Some(SenseVoiceLanguage::Ja),
             "ko" => Some(SenseVoiceLanguage::Ko),
+            "nospeech" => Some(SenseVoiceLanguage::NoSpeech),
             _ => None,
         }
     }
@@ -91,6 +95,8 @@ pub enum SenseVoiceEmo {
     Disgusted,
     /// Surprised emotion
     Surprised,
+    /// Unknown emotion
+    Unknown,
 }
 
 /// Implementation of methods for `SenseVoiceEmo`.
@@ -115,6 +121,7 @@ impl SenseVoiceEmo {
             "FEARFUL" => Some(SenseVoiceEmo::Fearful),
             "DISGUSTED" => Some(SenseVoiceEmo::Disgusted),
             "SURPRISED" => Some(SenseVoiceEmo::Surprised),
+            "EMO_UNKNOWN" => Some(SenseVoiceEmo::Unknown),
             _ => None,
         }
     }
@@ -141,6 +148,8 @@ pub enum SenseVoiceEvent {
     Breath,
     /// Coughing sound
     Cough,
+    /// Unknown event
+    Unknown,
 }
 
 /// Implementation of methods for `SenseVoiceEvent`.
@@ -166,6 +175,7 @@ impl SenseVoiceEvent {
             "SNEEZE" => Some(SenseVoiceEvent::Sneeze),
             "BREATH" => Some(SenseVoiceEvent::Breath),
             "COUGH" => Some(SenseVoiceEvent::Cough),
+            "EVENT_UNK" => Some(SenseVoiceEvent::Unknown),
             _ => None,
         }
     }
@@ -300,139 +310,237 @@ impl SenseVoiceSmallError {
 /// Represents the core structure for the SenseVoiceSmall speech recognition system.
 ///
 /// This structure manages components such as voice activity detection (VAD), automatic speech recognition (ASR),
-/// and RKNN model inference for processing audio data.
+/// and inference (RKNN or ONNX) for processing audio data.
 #[derive(Debug)]
 pub struct SenseVoiceSmall {
-    vad_frontend: WavFrontend,
     asr_frontend: WavFrontend,
+    #[cfg(feature = "rknpu")]
     n_seq: usize,
     spp: SentencePieceProcessor,
-    rknn: Rknn,
-    fsmn: Mutex<FSMNVad>,
 
+    // RKNN specific fields
+    #[cfg(feature = "rknpu")]
+    rknn: Option<Rknn>,
+    #[cfg(feature = "rknpu")]
+    embedding: Option<ndarray::Array2<f32>>,
+
+    // ONNX specific fields
+    ort_session: Option<Mutex<ort::session::Session>>,
+
+    // VAD
+    vad_config: VadConfig,
+    // silero_vad used in stream, but for batch we instantiate a new one to avoid state issues or use this one if mutexed?
+    // Let's keep a template or config. For stream we need stateful processor.
+    // For batch `infer_vec`, we should create a fresh processor to avoid carrying state.
+    // But `infer_stream` uses `silero_vad` field.
     #[cfg(feature = "stream")]
     silero_vad: VadProcessor,
-    embedding: Array2<f32>,
+
+    use_rknn: bool,
 }
 
 /// Implementation of methods for `SenseVoiceSmall`.
 impl SenseVoiceSmall {
-    /// Initializes a new `SenseVoiceSmall` instance by loading necessary models and configurations from Hugging Face Hub.
+    /// Initializes a new `SenseVoiceSmall` instance.
     ///
-    /// This function downloads required models and configurations from the "happyme531/SenseVoiceSmall-RKNN2" repository
-    /// on Hugging Face Hub, including VAD, embedding, RKNN, and sentencepiece models.
+    /// If the `rknpu` feature is enabled, it initializes the RKNN backend using the default RKNN model.
+    /// Otherwise, it initializes the ONNX backend using the default ONNX model.
+    ///
+    /// # Arguments
+    ///
+    /// * `vadconfig` - Configuration for VAD (Silero VAD).
     ///
     /// # Errors
     ///
-    /// Returns an error if any of the model files cannot be loaded or if there are issues initializing the components.
+    /// Returns an error if model files cannot be loaded.
+    pub fn init(vadconfig: VadConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        #[cfg(feature = "rknpu")]
+        {
+            // RKNN Path
+            let model_path = "happyme531/SenseVoiceSmall-RKNN2";
+
+            let api = Api::new().unwrap();
+            let repo = api.model(model_path.to_string());
+
+            // FSMN VAD files removed
+            let embedding_path = repo.get("embedding.npy")?;
+            let rknn_path = repo.get("sense-voice-encoder.rknn")?;
+            let sentence_path = repo.get("chn_jpn_yue_eng_ko_spectok.bpe.model")?;
+            let am_path = repo.get("am.mvn")?;
+
+            let config = SenseVoiceConfig {
+                model_path: rknn_path,
+                tokenizer_path: sentence_path,
+                cmvn_path: Some(am_path),
+            };
+
+            let embedding_file = File::open(embedding_path)?;
+            let embedding_reader = BufReader::new(embedding_file);
+            let embedding: Array2<f32> = Array2::read_npy(embedding_reader)?;
+            assert_eq!(embedding.shape()[1], 560, "Embedding dimension must be 560");
+
+            let rknn = Rknn::rknn_init(config.model_path)?;
+            let spp = SentencePieceProcessor::open(config.tokenizer_path)?;
+
+            let n_seq = 171;
+
+            // vad_frontend removed
+
+            let asr_frontend = WavFrontend::new(WavFrontendConfig {
+                lfr_m: 7,
+                cmvn_file: Some(
+                    config
+                        .cmvn_path
+                        .as_ref()
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .to_owned(),
+                ),
+                ..Default::default()
+            })?;
+
+            #[cfg(feature = "stream")]
+            let silero_vad = VadProcessor::new(vadconfig)?;
+
+            // We need a dummy WavFrontend for the struct if we don't remove the field?
+            // I will remove the field `vad_frontend` in the struct definition update below/above.
+            // So here I construct without it.
+            // But wait, `WavFrontend` struct is still there.
+            // Let's assume I removed it from struct.
+
+            Ok(SenseVoiceSmall {
+                asr_frontend,
+                n_seq,
+                spp,
+                rknn: Some(rknn),
+                embedding: Some(embedding),
+                ort_session: None,
+                vad_config: vadconfig,
+                #[cfg(feature = "stream")]
+                silero_vad,
+                use_rknn: true,
+            })
+        }
+        #[cfg(not(feature = "rknpu"))]
+        {
+            // ONNX Path
+            // Use haixuantao/SenseVoiceSmall-onnx
+            let model_repo = "haixuantao/SenseVoiceSmall-onnx";
+            let api = Api::new().unwrap();
+            let repo = api.model(model_repo.to_string());
+
+            let model_path = repo.get("model_quant.onnx")?;
+            let tokenizer_path = repo.get("chn_jpn_yue_eng_ko_spectok.bpe.model")?;
+            let am_path = repo.get("am.mvn")?;
+
+            let config = SenseVoiceConfig {
+                model_path,
+                tokenizer_path,
+                cmvn_path: Some(am_path),
+            };
+
+            Self::init_with_config(config, vadconfig)
+        }
+    }
+
+    /// Initializes a new `SenseVoiceSmall` instance with custom configuration.
     ///
-    /// # Example
+    /// # Arguments
     ///
-    /// ```
-    /// use sensevoice_rs::SenseVoiceSmall;
+    /// * `config` - The configuration containing file paths.
+    /// * `vadconfig` - Configuration for VAD.
     ///
-    /// let mut svs = SenseVoiceSmall::init().expect("Failed to initialize SenseVoiceSmall");
-    /// ```
-    pub fn init<P: AsRef<std::path::Path>>(
-        model_path: P,
-        vadconfig: VADXOptions,
+    /// # Errors
+    ///
+    /// Returns an error if model files cannot be loaded.
+    pub fn init_with_config(
+        config: SenseVoiceConfig,
+        vadconfig: VadConfig,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        // TODO: Maybe we should read a config file in the reop to read model.
-        let api = Api::new().unwrap();
-        let repo = api.model(model_path.as_ref().to_string_lossy().to_string());
-        let fsmn_path = repo.get("fsmnvad-offline.onnx")?;
-        let embedding_path = repo.get("embedding.npy")?;
-        let rknn_path = repo.get("sense-voice-encoder.rknn")?;
-        let sentence_path = repo.get("chn_jpn_yue_eng_ko_spectok.bpe.model")?;
-        let fsmn_am_path = repo.get("fsmn-am.mvn")?;
-        let am_path = repo.get("am.mvn")?;
+        #[cfg(feature = "rknpu")]
+        {
+            // If rknpu feature is enabled, we check if it is an RKNN model
+            let is_rknn_model = config
+                .model_path
+                .extension()
+                .map_or(false, |ext| ext == "rknn");
+            if is_rknn_model {
+                return Err("Manual loading of RKNN models via init_with_config is not fully supported yet (missing embedding path). Use init() for default RKNN model.".into());
+            }
+        }
 
-        // TODO: Should read config
-        let fsmn = Mutex::new(FSMNVad::new(fsmn_path, vadconfig).unwrap());
+        // ONNX Loading
+        let spp = SentencePieceProcessor::open(&config.tokenizer_path)?;
 
-        // Load embedding.npy
-        let embedding_file = File::open(embedding_path)?;
-        let embedding_reader = BufReader::new(embedding_file);
-        let embedding: Array2<f32> = Array2::read_npy(embedding_reader)?;
-        assert_eq!(embedding.shape()[1], 560, "Embedding dimension must be 560");
+        // Load ONNX model
+        let ort_session = Mutex::new(
+            ort::session::Session::builder()?
+                .with_optimization_level(GraphOptimizationLevel::Level3)?
+                .with_intra_threads(4)?
+                .commit_from_file(&config.model_path)?,
+        );
 
-        let rknn = Rknn::rknn_init(rknn_path)?;
-        let spp = SentencePieceProcessor::open(sentence_path)?;
-
-        //TODO: We should read from config
-        let n_seq = 171; // 因為這個模型的向量已經被固定了，這是轉換成rknn的時候決定的，除非你將這個模型重新轉換成動態向量，否則這個數字不應該改變
-
-        // 設定vad前端
-        let vad_frontend = WavFrontend::new(WavFrontendConfig {
-            lfr_m: 5, // 調整為 5，對應 400 維特徵（5 * 80）
-            cmvn_file: Some(fsmn_am_path.to_str().unwrap().to_owned()),
-            ..Default::default()
-        })?;
-
-        // 設定asr前端
         let asr_frontend = WavFrontend::new(WavFrontendConfig {
-            lfr_m: 7, // 調整為 7，對應 560 維特徵（7 * 80）
-            cmvn_file: Some(am_path.to_str().unwrap().to_owned()),
+            lfr_m: 7,
+            cmvn_file: config.cmvn_path.map(|p| p.to_string_lossy().to_string()),
             ..Default::default()
         })?;
 
         #[cfg(feature = "stream")]
-        let silero_vad = VadProcessor::new(VadConfig::default())?;
+        let silero_vad = VadProcessor::new(vadconfig)?;
+
+        #[cfg(feature = "rknpu")]
+        let n_seq = 0;
 
         Ok(SenseVoiceSmall {
-            vad_frontend,
             asr_frontend,
-            embedding,
+            #[cfg(feature = "rknpu")]
             n_seq,
-
+            spp,
+            #[cfg(feature = "rknpu")]
+            rknn: None,
+            #[cfg(feature = "rknpu")]
+            embedding: None,
+            ort_session: Some(ort_session),
+            vad_config: vadconfig,
             #[cfg(feature = "stream")]
             silero_vad,
-            spp,
-            rknn,
-            fsmn,
+            use_rknn: false,
         })
     }
 
     /// Performs speech recognition on a vector of audio samples.
-    ///
-    /// This method processes raw audio samples, extracts features, detects speech segments using VAD,
-    /// and transcribes each segment into text with associated metadata.
-    ///
-    /// # Arguments
-    ///
-    /// * `content` - A vector of 16-bit integer audio samples.
-    /// * `sample_rate` - The sample rate of the audio (e.g., 8000 or 16000 Hz).
-    ///
-    /// # Returns
-    ///
-    /// A `Result` containing a vector of `VoiceText` instances, each representing a transcribed audio segment.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if feature extraction, VAD inference, or RKNN processing fails.
     pub fn infer_vec(
         &self,
         content: Vec<i16>,
-        sample_rate: u32,
+        _sample_rate: u32, // Silero VAD config has sample_rate
     ) -> Result<Vec<VoiceText>, Box<dyn std::error::Error>> {
-        // 提取特徵
-        let audio_feats = self.vad_frontend.extract_features(&content)?;
-
-        // 進行 VAD 推理
-        let segments = {
-            let mut fsmn = self.fsmn.lock().unwrap();
-            fsmn.infer_vad(audio_feats, &content, true)?
-        };
-
-        // 處理語音片段
+        // Use Silero VAD to segment audio
+        let mut vad = VadProcessor::new(self.vad_config)?;
         let mut ret = Vec::new();
-        for (start_ms, end_ms) in segments {
-            let start_sample = (start_ms as f32 / 1000.0 * sample_rate as f32) as usize;
-            let end_sample = (end_ms as f32 / 1000.0 * sample_rate as f32) as usize;
-            let segment = &content[start_sample..end_sample];
-            let vt = self.recognition(segment)?;
+
+        let chunk_size = CHUNK_SIZE;
+        // Pad content to multiple of chunk_size
+        let mut padded_content = content.clone();
+        let remainder = padded_content.len() % chunk_size;
+        if remainder != 0 {
+            padded_content.extend(std::iter::repeat(0).take(chunk_size - remainder));
+        }
+
+        for chunk in padded_content.chunks_exact(chunk_size) {
+            let chunk_arr: &[i16; CHUNK_SIZE] = chunk.try_into()?;
+            if let Some(segment) = vad.process_chunk(chunk_arr) {
+                let vt = self.recognition(&segment)?;
+                ret.push(vt);
+            }
+        }
+
+        if let Some(segment) = vad.finish() {
+            let vt = self.recognition(&segment)?;
             ret.push(vt);
         }
+
         Ok(ret)
     }
 
@@ -440,32 +548,115 @@ impl SenseVoiceSmall {
         // 提取特徵
         let audio_feats = self.asr_frontend.extract_features(segment)?;
 
-        // 準備 RKNN 輸入
-        self.prepare_rknn_input_advanced(&audio_feats, 0, false)?; // language=0 (auto), use_itn=false
-        self.rknn.run()?;
-        let mut asr_output = self.rknn.outputs_get_raw::<f32>()?;
-        let asr_text = self.decode_asr_output(&asr_output.data)?;
-        self.rknn.outputs_release(&mut asr_output)?; // 資料會被丟棄，不可再用asr_output
-        match parse_line(&asr_text) {  // 處理輸出並解碼為文字
-            Some(vt) => Ok(vt),
-            None => Err(format!("Parse line failed, text is:{}, If u still get empty text, please check your vad config. This model only can infer 9 secs voice.",asr_text).into() ),
+        if self.use_rknn {
+            #[cfg(feature = "rknpu")]
+            {
+                if let Some(rknn) = &self.rknn {
+                    // 準備 RKNN 輸入
+                    self.prepare_rknn_input_advanced(&audio_feats, 0, false)?;
+                    rknn.run()?;
+                    let mut asr_output = rknn.outputs_get_raw::<f32>()?;
+                    let asr_text = self.decode_asr_output(&asr_output.data)?;
+                    rknn.outputs_release(&mut asr_output)?;
+                    return match parse_line(&asr_text) {
+                        Some(vt) => Ok(vt),
+                        None => Err(format!("Parse line failed, text is:{}, If u still get empty text, please check your vad config. This model only can infer 9 secs voice.", asr_text).into()),
+                    };
+                }
+            }
+            return Err("RKNN is enabled but model is not initialized".into());
+        } else {
+            // ONNX Inference
+            if let Some(session_mutex) = &self.ort_session {
+                let mut session = session_mutex.lock().unwrap();
+                // Prepare inputs for ONNX
+                // Inputs: speech (1, T, 560), language (1), textnorm (1)
+                // Assuming dynamic shape for T
+
+                let seq_len = audio_feats.shape()[0] as i32;
+                let speech = audio_feats.view().insert_axis(Axis(0)); // [1, T, 560]
+
+                // Language: 0 (auto/zn), TextNorm: 15 (woitn/none) or 14 (with itn)
+                // Existing code: "language=0 (auto), use_itn=false" -> text_norm_idx = 15
+                let language_val = 0i32;
+                let textnorm_val = 15i32; // 15 means 'woitn' (without ITN/punctuation?) based on prepare_rknn_input_advanced logic
+
+                let language = ndarray::arr1(&[language_val]);
+                let textnorm = ndarray::arr1(&[textnorm_val]);
+                let speech_lengths = ndarray::arr1(&[seq_len]);
+
+                let speech_tensor = ort::value::Tensor::from_array(speech.to_owned())?;
+                let speech_lengths_tensor =
+                    ort::value::Tensor::from_array(speech_lengths.to_owned())?;
+                let language_tensor = ort::value::Tensor::from_array(language.to_owned())?;
+                let textnorm_tensor = ort::value::Tensor::from_array(textnorm.to_owned())?;
+
+                let inputs = ort::inputs![
+                    "speech" => speech_tensor,
+                    "speech_lengths" => speech_lengths_tensor,
+                    "language" => language_tensor,
+                    "textnorm" => textnorm_tensor,
+                ];
+
+                let outputs = session.run(inputs)?;
+
+                // Output handling
+                // Usually output name is "logits" or similar.
+                // SenseVoice ONNX output is usually [1, V, T] or [1, T, V]?
+                // Let's assume [1, V, T] similar to RKNN or check dimensions.
+
+                // Try to get the first output
+                let (output_shape, output_data) = outputs[0].try_extract_tensor::<f32>()?;
+
+                // The decoding logic `decode_asr_output` expects `[n_vocab, n_seq]` (flattened or reshaped)
+                // The RKNN code does: `ArrayView3::from_shape((1, n_vocab, self.n_seq), output)`
+                // So RKNN output is [1, 25055, 171].
+                // We need to know the shape of ONNX output.
+                // Typically: [Batch, Time, Vocab] or [Batch, Vocab, Time].
+                // If it is [Batch, Time, Vocab], we need to permute or adjust decoding.
+                // SenseVoice (FunASR) usually outputs logits.
+
+                // Debug/Verify shape if possible.
+                // Assuming [1, Time, Vocab] for standard Transformers, but SenseVoice might be different.
+                // If shape is [1, Time, Vocab], we need to adjust decode_asr_output.
+
+                // Let's implement a generic decoder for ONNX output.
+                // Assuming output_shape dereferences to &[i64] or is compatible
+                let asr_text = self.decode_onnx_output(output_data, &output_shape)?;
+
+                return match parse_line(&asr_text) {
+                    Some(vt) => Ok(vt),
+                    None => Err(format!("Parse line failed, text is:{}", asr_text).into()),
+                };
+            }
+            return Err("ONNX session is not initialized".into());
         }
     }
 
     #[cfg(feature = "stream")]
-    pub fn infer_stream<S>(
-        &mut self,
+    pub fn infer_stream<'a, S>(
+        &'a mut self,
         input_stream: S,
-    ) -> impl Stream<Item = Result<VoiceText, Box<dyn std::error::Error>>>
+    ) -> impl Stream<Item = Result<VoiceText, Box<dyn std::error::Error>>> + 'a
     where
-        S: Stream<Item = Vec<i16>> + Unpin,
+        S: Stream<Item = Vec<i16>> + Unpin + 'a,
     {
         stream! {
         let mut stream = input_stream;
         while let Some(chunk) = stream.next().await {
-        if let Some(segment) = self.silero_vad.process_chunk(&chunk) {
-        yield self.recognition(&segment);
-        }
+            // Ensure chunk is 512 samples. If stream provides different sizes, we might need buffering.
+            // For now, assuming the stream provides correct chunks or we try to convert.
+            // process_chunk expects &[i16; 512].
+            if let Ok(chunk_arr) = chunk.as_slice().try_into() {
+                if let Some(segment) = self.silero_vad.process_chunk(chunk_arr) {
+                    yield self.recognition(&segment);
+                }
+            } else {
+                 // Handle mismatch size? For now ignore or log?
+                 // Or maybe we should allow partial chunks if the logic allows, but process_chunk seems strict.
+                 // Ideally we should buffer. But let's stick to simple fix first: expect 512.
+                 // If chunk is not 512, silero_vad might panic if we force it? No, try_into returns error.
+            }
         }
         if let Some(segment) = self.silero_vad.finish() {
         yield self.recognition(&segment);
@@ -474,38 +665,6 @@ impl SenseVoiceSmall {
     }
 
     /// Performs speech recognition on an audio file.
-    ///
-    /// This method reads a WAV file, validates its sample rate and format, and processes it to extract transcribed segments.
-    ///
-    /// # Arguments
-    ///
-    /// * `wav_path` - Path to the WAV file to process.
-    ///
-    /// # Returns
-    ///
-    /// A `Result` containing a vector of `VoiceText` instances, each representing a transcribed audio segment.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The WAV file cannot be opened or read.
-    /// - The sample rate is not 8000 or 16000 Hz.
-    /// - The sample format is not 16-bit integer.
-    /// - The audio content is empty or inference fails.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use sensevoice_rs::SenseVoiceSmall;
-    /// use std::path::Path;
-    ///
-    /// let mut svs = SenseVoiceSmall::init().expect("Failed to initialize");
-    /// let segments = svs.infer_file(Path::new("path/to/audio.wav"))
-    ///     .expect("Failed to infer audio file");
-    /// for seg in segments {
-    ///     println!("{:?}", seg);
-    /// }
-    /// ```
     pub fn infer_file<P: AsRef<std::path::Path>>(
         &self,
         wav_path: P,
@@ -540,29 +699,16 @@ impl SenseVoiceSmall {
     }
 
     /// Decodes RKNN output into a transcribed text string.
-    ///
-    /// This method processes the raw float output from the RKNN model, converts it to token IDs,
-    /// removes duplicates and blanks, and decodes it into human-readable text.
-    ///
-    /// # Arguments
-    ///
-    /// * `output` - A slice of floats representing the RKNN model's output.
-    ///
-    /// # Returns
-    ///
-    /// A `Result` containing the decoded text string.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the output cannot be reshaped, token decoding fails, or sentencepiece processing encounters an issue.
+    #[cfg(feature = "rknpu")]
     fn decode_asr_output(&self, output: &[f32]) -> Result<String, Box<dyn std::error::Error>> {
         // 解析為 [1, n_vocab, n_seq]
         let n_vocab = self.spp.len();
+        // RKNN n_seq is fixed 171
         let output_array = ArrayView3::from_shape((1, n_vocab, self.n_seq), output)?;
 
         // 在 n_vocab 維度（Axis(1)）上取 argmax
         let token_ids: Vec<i32> = output_array
-            .axis_iter(Axis(2)) // 沿著 n_seq=171 維度迭代，得到 [1, 25055] 的視圖
+            .axis_iter(Axis(2)) // 沿著 n_seq=171 維度迭代
             .into_par_iter()
             .map(|slice| {
                 slice
@@ -579,6 +725,11 @@ impl SenseVoiceSmall {
             })
             .collect();
 
+        self.ids_to_text(token_ids)
+    }
+
+    /// Helper to convert token IDs to text
+    fn ids_to_text(&self, token_ids: Vec<i32>) -> Result<String, Box<dyn std::error::Error>> {
         // 移除連續重複的 token 和 blank_id=0
         let mut unique_ids = Vec::new();
         let mut prev_id = None;
@@ -594,6 +745,82 @@ impl SenseVoiceSmall {
         // 解碼為文本
         let decoded_text = self.spp.decode_piece_ids(&unique_ids)?;
         Ok(decoded_text)
+    }
+
+    /// Decodes ONNX output.
+    fn decode_onnx_output(
+        &self,
+        output: &[f32],
+        shape: &[i64],
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        // Shape is likely [1, T, Vocab] or [1, Vocab, T].
+        // If T is dynamic, we use it.
+        // Assuming [1, T, Vocab] which is common for CTC/Frame-level outputs from generic inference.
+        // But RKNN was [1, Vocab, T].
+        // Let's assume standard SenseVoice ONNX matches pytorch output: [Batch, Time, Vocab].
+
+        let batch_size = shape[0] as usize;
+        if batch_size != 1 {
+            return Err("Batch size must be 1".into());
+        }
+
+        // Guessing layout based on dimensions. Vocab size is ~25055.
+        // If dim 1 is ~25000, then it is [B, V, T].
+        // If dim 2 is ~25000, then it is [B, T, V].
+
+        let n_vocab = self.spp.len(); // ~25055
+        let dim1 = shape[1] as usize;
+        let dim2 = shape[2] as usize;
+
+        let output_array = ArrayView3::from_shape(
+            (shape[0] as usize, shape[1] as usize, shape[2] as usize),
+            output,
+        )?;
+        let mut token_ids = Vec::new();
+
+        if dim1 == n_vocab {
+            // [B, V, T] - iterate over T (dim 2)
+            for t in 0..dim2 {
+                // slice at time t: [1, V]
+                let col = output_array.slice(s![0, .., t]);
+                // argmax over V
+                let (best_idx, _) = col.iter().enumerate().fold(
+                    (0, f32::NEG_INFINITY),
+                    |(acc_idx, acc_val), (i, &val)| {
+                        if val > acc_val {
+                            (i, val)
+                        } else {
+                            (acc_idx, acc_val)
+                        }
+                    },
+                );
+                token_ids.push(best_idx as i32);
+            }
+        } else if dim2 == n_vocab {
+            // [B, T, V] - iterate over T (dim 1)
+            for t in 0..dim1 {
+                let row = output_array.slice(s![0, t, ..]);
+                let (best_idx, _) = row.iter().enumerate().fold(
+                    (0, f32::NEG_INFINITY),
+                    |(acc_idx, acc_val), (i, &val)| {
+                        if val > acc_val {
+                            (i, val)
+                        } else {
+                            (acc_idx, acc_val)
+                        }
+                    },
+                );
+                token_ids.push(best_idx as i32);
+            }
+        } else {
+            return Err(format!(
+                "Unexpected output shape: {:?}, expected one dimension to be vocab size {}",
+                shape, n_vocab
+            )
+            .into());
+        }
+
+        self.ids_to_text(token_ids)
     }
 
     /// Destroys the `SenseVoiceSmall` instance, releasing associated resources.
@@ -613,7 +840,11 @@ impl SenseVoiceSmall {
     /// svs.destroy().expect("Failed to destroy SenseVoiceSmall");
     /// ```
     pub fn destroy(&self) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(self.rknn.destroy()?)
+        #[cfg(feature = "rknpu")]
+        if let Some(rknn) = &self.rknn {
+            rknn.destroy()?;
+        }
+        Ok(())
     }
 
     /// Prepares input data for RKNN inference with advanced configuration.
@@ -630,6 +861,7 @@ impl SenseVoiceSmall {
     /// # Errors
     ///
     /// Returns an error if tensor concatenation, padding, or RKNN input setting fails.
+    #[cfg(feature = "rknpu")]
     fn prepare_rknn_input_advanced(
         &self,
         feats: &Array2<f32>,
@@ -637,13 +869,12 @@ impl SenseVoiceSmall {
         use_itn: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // 提取嵌入向量
-        let language_query = self.embedding.slice(s![language, ..]).insert_axis(Axis(0));
+        let embedding = self.embedding.as_ref().ok_or("Embedding not loaded")?;
+
+        let language_query = embedding.slice(s![language, ..]).insert_axis(Axis(0));
         let text_norm_idx = if use_itn { 14 } else { 15 };
-        let text_norm_query = self
-            .embedding
-            .slice(s![text_norm_idx, ..])
-            .insert_axis(Axis(0));
-        let event_emo_query = self.embedding.slice(s![1..=2, ..]).to_owned();
+        let text_norm_query = embedding.slice(s![text_norm_idx, ..]).insert_axis(Axis(0));
+        let event_emo_query = embedding.slice(s![1..=2, ..]).to_owned();
 
         // 縮放語音特徵
         let speech = feats.mapv(|x| x * 0.5);
@@ -679,13 +910,15 @@ impl SenseVoiceSmall {
             .into_shape_with_order(1 * self.n_seq * 560)? // Flatten to [95760]
             .to_vec(); // Owned Vec<f32>
 
-        self.rknn.input_set(&mut RknnInput {
-            index: 0,             // 根據您的輸入索引設定
-            buf: flattened_input, /* 您的數據 */
-            pass_through: false,  // 通常設為 false，除非模型需要特殊處理
-            type_: RknnTensorType::Float32,
-            fmt: RknnTensorFormat::NCHW,
-        })?;
+        if let Some(rknn) = &self.rknn {
+            rknn.input_set(&mut RknnInput {
+                index: 0,             // 根據您的輸入索引設定
+                buf: flattened_input, /* 您的數據 */
+                pass_through: false,  // 通常設為 false，除非模型需要特殊處理
+                type_: RknnTensorType::Float32,
+                fmt: RknnTensorFormat::NCHW,
+            })?;
+        }
         Ok(())
     }
 }

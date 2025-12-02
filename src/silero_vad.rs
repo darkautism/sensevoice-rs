@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use voice_activity_detector::{IteratorExt, VoiceActivityDetector};
-const CHUNK_SIZE: usize = 512;
+pub const CHUNK_SIZE: usize = 512;
 
 #[derive(Debug, Clone, Copy)]
 pub struct VadConfig {
@@ -93,8 +93,7 @@ impl VadProcessor {
             return None;
         }
 
-        let chunk_duration_ms =
-            (CHUNK_SIZE as f32 / self.config.sample_rate as f32) * 1000.0;
+        let chunk_duration_ms = (CHUNK_SIZE as f32 / self.config.sample_rate as f32) * 1000.0;
         let rollback_chunks =
             (self.config.rollback_duration_ms as f32 / chunk_duration_ms).ceil() as usize;
         let rollback_samples = rollback_chunks * CHUNK_SIZE;
