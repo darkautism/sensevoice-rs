@@ -1103,6 +1103,21 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "rawpointer",
+]
+
+[[package]]
+name = "ndarray"
+version = "0.17.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c7c9125e8f6f10c9da3aad044cc918cf8784fa34de857b1aa68038eb05a50a9"
+dependencies = [
+ "matrixmultiply",
+ "num-complex",
+ "num-integer",
+ "num-traits",
+ "portable-atomic",
+ "portable-atomic-util",
+ "rawpointer",
  "rayon",
 ]
 
@@ -1113,7 +1128,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b313788c468c49141a9d9b6131fc15f403e6ef4e8446a0b2e18f664ddb278a9"
 dependencies = [
  "byteorder",
- "ndarray",
+ "ndarray 0.16.1",
  "num-complex",
  "num-traits",
  "py_literal",
@@ -1128,7 +1143,7 @@ checksum = "17ebbe97acce52d06aebed4cd4a87c0941f4b2519b59b82b4feb5bd0ce003dfd"
 dependencies = [
  "indexmap",
  "itertools",
- "ndarray",
+ "ndarray 0.16.1",
  "noisy_float",
  "num-integer",
  "num-traits",
@@ -1290,7 +1305,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fa7e49bd669d32d7bc2a15ec540a527e7764aec722a45467814005725bcd721"
 dependencies = [
  "libloading",
- "ndarray",
+ "ndarray 0.16.1",
  "ort-sys",
  "smallvec 2.0.0-alpha.10",
  "tracing",
@@ -1847,7 +1862,7 @@ dependencies = [
  "hf-hub",
  "hound",
  "kaldi-fbank-rust-kautism",
- "ndarray",
+ "ndarray 0.17.1",
  "ndarray-npy",
  "ndarray-stats",
  "ort",
@@ -2387,7 +2402,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "50407ebe9f37f46ee5d9a7a4228324f400439de9c62861273ab34bcfbdaf08b6"
 dependencies = [
  "futures",
- "ndarray",
+ "ndarray 0.16.1",
  "ort",
  "ort-sys",
  "pin-project",
