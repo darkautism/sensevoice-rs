@@ -21,7 +21,7 @@ use rknn_rs::prelude::{Rknn, RknnInput, RknnTensorFormat, RknnTensorType};
 use sentencepiece::SentencePieceProcessor;
 
 use config::SenseVoiceConfig;
-use silero_vad::{VadConfig, VadProcessor, CHUNK_SIZE};
+use silero_vad::{VadConfig, VadOutput, VadProcessor, CHUNK_SIZE};
 use wavfrontend::{WavFrontend, WavFrontendConfig};
 
 #[cfg(feature = "stream")]
@@ -510,6 +510,13 @@ impl SenseVoiceSmall {
         })
     }
 
+    /// Updates the silence notification threshold for VAD.
+    /// If `ms` is Some, a NoSpeech event will be emitted once after `ms` milliseconds of continuous dropped audio (waiting state).
+    #[cfg(feature = "stream")]
+    pub fn set_vad_silence_notification(&mut self, ms: Option<u32>) {
+        self.silero_vad.set_notify_silence_after_ms(ms);
+    }
+
     /// Performs speech recognition on a vector of audio samples.
     pub fn infer_vec(
         &self,
@@ -530,15 +537,44 @@ impl SenseVoiceSmall {
 
         for chunk in padded_content.chunks_exact(chunk_size) {
             let chunk_arr: &[i16; CHUNK_SIZE] = chunk.try_into()?;
-            if let Some(segment) = vad.process_chunk(chunk_arr) {
-                let vt = self.recognition(&segment)?;
-                ret.push(vt);
+            if let Some(output) = vad.process_chunk(chunk_arr) {
+                match output {
+                    VadOutput::Segment(segment) => {
+                        let vt = self.recognition(&segment)?;
+                        ret.push(vt);
+                    },
+                    VadOutput::SilenceNotification => {
+                        // For batch infer, usually we don't need intermediate notifications,
+                        // but if configured in vad_config, we respect it.
+                        ret.push(VoiceText {
+                            language: SenseVoiceLanguage::NoSpeech,
+                            emotion: SenseVoiceEmo::Unknown,
+                            event: SenseVoiceEvent::Unknown,
+                            punctuation_normalization: SenseVoicePunctuationNormalization::Woitn,
+                            content: String::new(),
+                        });
+                    }
+                }
             }
         }
 
-        if let Some(segment) = vad.finish() {
-            let vt = self.recognition(&segment)?;
-            ret.push(vt);
+        if let Some(output) = vad.finish() {
+            match output {
+                VadOutput::Segment(segment) => {
+                    let vt = self.recognition(&segment)?;
+                    ret.push(vt);
+                },
+                VadOutput::SilenceNotification => {
+                    // Should not happen in finish usually, but handle it
+                    ret.push(VoiceText {
+                        language: SenseVoiceLanguage::NoSpeech,
+                        emotion: SenseVoiceEmo::Unknown,
+                        event: SenseVoiceEvent::Unknown,
+                        punctuation_normalization: SenseVoicePunctuationNormalization::Woitn,
+                        content: String::new(),
+                    });
+                }
+            }
         }
 
         Ok(ret)
@@ -648,18 +684,41 @@ impl SenseVoiceSmall {
             // For now, assuming the stream provides correct chunks or we try to convert.
             // process_chunk expects &[i16; 512].
             if let Ok(chunk_arr) = chunk.as_slice().try_into() {
-                if let Some(segment) = self.silero_vad.process_chunk(chunk_arr) {
-                    yield self.recognition(&segment);
+                if let Some(output) = self.silero_vad.process_chunk(chunk_arr) {
+                    match output {
+                        VadOutput::Segment(segment) => {
+                            yield self.recognition(&segment);
+                        },
+                        VadOutput::SilenceNotification => {
+                            yield Ok(VoiceText {
+                                language: SenseVoiceLanguage::NoSpeech,
+                                emotion: SenseVoiceEmo::Unknown,
+                                event: SenseVoiceEvent::Unknown,
+                                punctuation_normalization: SenseVoicePunctuationNormalization::Woitn,
+                                content: String::new(),
+                            });
+                        }
+                    }
                 }
             } else {
                  // Handle mismatch size? For now ignore or log?
-                 // Or maybe we should allow partial chunks if the logic allows, but process_chunk seems strict.
-                 // Ideally we should buffer. But let's stick to simple fix first: expect 512.
-                 // If chunk is not 512, silero_vad might panic if we force it? No, try_into returns error.
             }
         }
-        if let Some(segment) = self.silero_vad.finish() {
-        yield self.recognition(&segment);
+        if let Some(output) = self.silero_vad.finish() {
+            match output {
+                VadOutput::Segment(segment) => {
+                    yield self.recognition(&segment);
+                },
+                VadOutput::SilenceNotification => {
+                     yield Ok(VoiceText {
+                        language: SenseVoiceLanguage::NoSpeech,
+                        emotion: SenseVoiceEmo::Unknown,
+                        event: SenseVoiceEvent::Unknown,
+                        punctuation_normalization: SenseVoicePunctuationNormalization::Woitn,
+                        content: String::new(),
+                    });
+                }
+            }
         }
         }
     }
