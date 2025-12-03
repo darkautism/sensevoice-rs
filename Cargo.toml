@@ -1,6 +1,6 @@
 [package]
 name = "sensevoice-rs"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 description = "A Rust-based, SenseVoiceSmall "
 homepage = "https://github.com/darkautism/sensevoice-rs"
