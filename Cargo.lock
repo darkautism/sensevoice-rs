@@ -104,9 +104,9 @@ checksum = "55248b47b0caf0546f7988906588779981c43bb1bc9d0c44087278f80cdb44ba"
 
 [[package]]
 name = "bindgen"
-version = "0.71.1"
+version = "0.72.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f58bf3d7db68cfbac37cfc485a8d711e87e064c3d0fe0435b92f7a407f9d6b3"
+checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
 dependencies = [
  "bitflags",
  "cexpr",
@@ -145,9 +145,9 @@ checksum = "1628fb46dfa0b37568d12e5edd512553eccf6a22a78e8bde00bb4aed84d5bdbf"
 
 [[package]]
 name = "bytemuck"
-version = "1.21.0"
+version = "1.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef657dfab802224e671f5818e9a4935f9b1957ed18e58292690cc39e7a4092a3"
+checksum = "1fbdf580320f38b612e485521afda1ee26d10cc9884efaaa750d383e13e3c5f4"
 
 [[package]]
 name = "byteorder"
@@ -1714,12 +1714,21 @@ dependencies = [
 
 [[package]]
 name = "rknn-rs"
-version = "0.1.2"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "670d8db681665197c8c469ebe7991b5213458f5ae105e64f6fdb596b462dd162"
+checksum = "d8de7e348a443f447794ffb2b8a0d358acbd0d38d3aca26aae8a4fc6e6651e50"
+dependencies = [
+ "bytemuck",
+ "rknn-sys-rs",
+]
+
+[[package]]
+name = "rknn-sys-rs"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6cb67524707e073644df4c2e5b3f5a4d704828c30339f7498d39dda1b1fe14ab"
 dependencies = [
  "bindgen",
- "bytemuck",
 ]
 
 [[package]]

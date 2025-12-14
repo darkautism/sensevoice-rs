@@ -591,9 +591,8 @@ impl SenseVoiceSmall {
                     // 準備 RKNN 輸入
                     self.prepare_rknn_input_advanced(&audio_feats, 0, false)?;
                     rknn.run()?;
-                    let mut asr_output = rknn.outputs_get_raw::<f32>()?;
-                    let asr_text = self.decode_asr_output(&asr_output.data)?;
-                    rknn.outputs_release(&mut asr_output)?;
+                    let asr_output = rknn.outputs_get::<f32>()?;
+                    let asr_text = self.decode_asr_output(&asr_output)?;
                     return match parse_line(&asr_text) {
                         Some(vt) => Ok(vt),
                         None => Err(format!("Parse line failed, text is:{}, If u still get empty text, please check your vad config. This model only can infer 9 secs voice.", asr_text).into()),
@@ -899,10 +898,6 @@ impl SenseVoiceSmall {
     /// svs.destroy().expect("Failed to destroy SenseVoiceSmall");
     /// ```
     pub fn destroy(&self) -> Result<(), Box<dyn std::error::Error>> {
-        #[cfg(feature = "rknpu")]
-        if let Some(rknn) = &self.rknn {
-            rknn.destroy()?;
-        }
         Ok(())
     }
 

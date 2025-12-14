@@ -7,12 +7,12 @@ homepage = "https://github.com/darkautism/sensevoice-rs"
 license = "MIT"
 
 [patch.crates-io]
-#rknn-rs = { path = "../rknn-rs"}
+# rknn-rs = { path = "../rknn-rs/rknn-rs"}
 #voice_activity_detector = { path = "../voice_activity_detector"}
 
 [dependencies]
 kaldi-fbank-rust-kautism = "0.1.0"
-rknn-rs = { version = "0.1.2", optional = true }
+rknn-rs = { version = "0.2.0", optional = true }
 hound = "3.5.1"
 ndarray = { version="0.16.1", features=["rayon"]}
 ndarray-npy = "0.9.1"
@@ -31,7 +31,7 @@ tokio = { version = "1.36", features = ["full"] }
 futures = "0.3.31"
 
 [features]
-default = []
+default = ["rknpu"]
 stream = ["futures", "async-stream"]
 rknpu = ["dep:rknn-rs"]
 
