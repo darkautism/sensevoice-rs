@@ -558,7 +558,7 @@ impl SenseVoiceSmall {
             }
         }
 
-        if let Some(output) = vad.finish() {
+        while let Some(output) = vad.finish() {
             match output {
                 VadOutput::Segment(segment) => {
                     let vt = self.recognition(&segment)?;
@@ -704,7 +704,7 @@ impl SenseVoiceSmall {
                  // Handle mismatch size? For now ignore or log?
             }
         }
-        if let Some(output) = self.silero_vad.finish() {
+        while let Some(output) = self.silero_vad.finish() {
             match output {
                 VadOutput::Segment(segment) => {
                     yield self.recognition(&segment);
