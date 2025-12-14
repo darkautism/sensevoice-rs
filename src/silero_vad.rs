@@ -1,6 +1,4 @@
-use std::{
-    collections::{HashMap, VecDeque},
-};
+use std::collections::{HashMap, VecDeque};
 
 use candle_core::{DType, Device, Error, Tensor};
 use candle_onnx::onnx::ModelProto;
@@ -23,11 +21,11 @@ static DEFAULT_MODEL_FILE: &str = "onnx/model.onnx";
 
 #[derive(Debug, Clone, Copy)]
 pub struct VadConfig {
-    pub sample_rate: u32,            // 採樣率，例如 16000 Hz
-    pub speech_threshold: f32,       // 語音概率閾值，例如 0.5
-    pub silence_duration_ms: u32,    // 靜音持續時間（毫秒），例如 500 ms
-    pub max_speech_duration_ms: u32, // 最大語音段長（毫秒），例如 10000 ms
-    pub rollback_duration_ms: u32,   // 剪斷後回退時間（毫秒），例如 200 ms
+    pub sample_rate: u32,                     // 採樣率，例如 16000 Hz
+    pub speech_threshold: f32,                // 語音概率閾值，例如 0.5
+    pub silence_duration_ms: u32,             // 靜音持續時間（毫秒），例如 500 ms
+    pub max_speech_duration_ms: u32,          // 最大語音段長（毫秒），例如 10000 ms
+    pub rollback_duration_ms: u32,            // 剪斷後回退時間（毫秒），例如 200 ms
     pub min_speech_duration_ms: u32, // 最小語音段長（毫秒），小於此長度視為噪音，例如 250 ms
     pub notify_silence_after_ms: Option<u32>, // 如果處於等待狀態超過此時間，發出靜音通知
 }
@@ -84,17 +82,24 @@ impl VadProcessor {
             (config.silence_duration_ms as usize * config.sample_rate as usize) / 1000,
             config.sample_rate as usize,
         );
-        
+
         // Map VadConfig to InnerVadConfig
         inner_config.threshold = config.speech_threshold;
-        inner_config.min_speech = (config.min_speech_duration_ms as usize * config.sample_rate as usize) / 1000;
-        inner_config.max_speech = (config.max_speech_duration_ms as usize * config.sample_rate as usize) / 1000;
-        inner_config.speech_pad = (config.rollback_duration_ms as usize * config.sample_rate as usize) / 1000;
+        inner_config.min_speech =
+            (config.min_speech_duration_ms as usize * config.sample_rate as usize) / 1000;
+        inner_config.max_speech =
+            (config.max_speech_duration_ms as usize * config.sample_rate as usize) / 1000;
+        inner_config.speech_pad =
+            (config.rollback_duration_ms as usize * config.sample_rate as usize) / 1000;
 
         let mut inner = InnerVad::new(inner_config);
-        
+
         // Load model
         inner.load("")?; // Empty string triggers default download
+
+        // Calculate max capacity for AudioBuffer: max_speech_duration + 1000ms buffer
+        let max_samples =
+            ((config.max_speech_duration_ms + 1000) as usize * config.sample_rate as usize) / 1000;
 
         Ok(Self {
             inner,
@@ -102,7 +107,7 @@ impl VadProcessor {
             waiting_dropped_samples: 0,
             notified_silence: false,
             pending_segments: VecDeque::new(),
-            audio_buffer: AudioBuffer::new(config.sample_rate as usize),
+            audio_buffer: AudioBuffer::new(config.sample_rate as usize, max_samples),
             flushed: false,
         })
     }
@@ -119,21 +124,23 @@ impl VadProcessor {
         // Convert i16 to f32
         let chunk_f32: Vec<f32> = chunk.iter().map(|&x| x as f32 / 32768.0).collect();
 
-        // Feed to Audio Buffer (clone because we need ownership in buffer)
-        self.audio_buffer.input(chunk_f32.clone());
+        // Feed to Audio Buffer
+        self.audio_buffer.input(&chunk_f32);
 
         // Feed to InnerVad
         let _ = self.inner.feed_chunk(chunk_f32).ok()?;
-        
+
         // Check for new segments FIRST, before pruning
         while let Some((start, end)) = self.inner.yield_segment() {
-             if let Some(segment_data) = self.audio_buffer.output(start, end) {
-                 // Convert back to i16 with safe casting
-                 let segment_i16: Vec<i16> = segment_data.audio.iter()
+            if let Some(segment_data) = self.audio_buffer.output(start, end) {
+                // Convert back to i16 with safe casting
+                let segment_i16: Vec<i16> = segment_data
+                    .audio
+                    .iter()
                     .map(|&x| (x * 32768.0).clamp(-32768.0, 32767.0) as i16)
                     .collect();
-                 self.pending_segments.push_back(segment_i16);
-             }
+                self.pending_segments.push_back(segment_i16);
+            }
         }
 
         // Prune AudioBuffer logic
@@ -142,13 +149,13 @@ impl VadProcessor {
         // min_required includes speech_pad adjustment internally if needed, or we apply it here?
         // Let's implement min_required_history to return the absolute index we need to keep.
         let keep_threshold = if min_required > self.inner.speech_pad {
-             min_required - self.inner.speech_pad
+            min_required - self.inner.speech_pad
         } else {
-             0
+            0
         };
-        
+
         self.audio_buffer.prune(keep_threshold);
-        
+
         // Return pending segment if any (Prioritize segments over silence notification)
         if let Some(seg) = self.pending_segments.pop_front() {
             return Some(VadOutput::Segment(seg));
@@ -158,11 +165,11 @@ impl VadProcessor {
         if self.inner.is_idle() {
             self.waiting_dropped_samples += CHUNK_SIZE;
             if let Some(limit_ms) = self.config.notify_silence_after_ms {
-                 let limit_samples = (limit_ms as usize * self.config.sample_rate as usize) / 1000;
-                 if self.waiting_dropped_samples >= limit_samples && !self.notified_silence {
-                     self.notified_silence = true;
-                     return Some(VadOutput::SilenceNotification);
-                 }
+                let limit_samples = (limit_ms as usize * self.config.sample_rate as usize) / 1000;
+                if self.waiting_dropped_samples >= limit_samples && !self.notified_silence {
+                    self.notified_silence = true;
+                    return Some(VadOutput::SilenceNotification);
+                }
             }
         } else {
             self.waiting_dropped_samples = 0;
@@ -177,13 +184,15 @@ impl VadProcessor {
             let _ = self.inner.flush();
             self.flushed = true;
         }
-        
+
         while let Some((start, end)) = self.inner.yield_segment() {
             if let Some(segment_data) = self.audio_buffer.output(start, end) {
-                 let segment_i16: Vec<i16> = segment_data.audio.iter()
+                let segment_i16: Vec<i16> = segment_data
+                    .audio
+                    .iter()
                     .map(|&x| (x * 32768.0).clamp(-32768.0, 32767.0) as i16)
                     .collect();
-                 self.pending_segments.push_back(segment_i16);
+                self.pending_segments.push_back(segment_i16);
             }
         }
 
@@ -257,6 +266,9 @@ struct InnerVad {
     padded: bool,
     segments: Vec<(usize, usize)>,
     // buffer: Vec<f32>, // 移除未使用的欄位 (InnerVad 自己的 buffer 未被使用，我們用 AudioBuffer)
+    input_key: String,
+    sr_key: String,
+    state_key: String,
 }
 
 impl InnerVad {
@@ -267,13 +279,13 @@ impl InnerVad {
         } else {
             CHUNKS_SR16K
         };
-        
+
         let min_speech = config.min_speech;
         let speech_pad = config.speech_pad;
-        let max_speech = config.max_speech - chunk_size - 2 * speech_pad; 
+        let max_speech = config.max_speech - chunk_size - 2 * speech_pad;
         let min_silence = config.min_silence;
         let min_silence_at_max_speech = config.min_silence_at_max_speech;
-        
+
         let neg_threshold = config.threshold - config.hysteresis;
 
         InnerVad {
@@ -303,6 +315,9 @@ impl InnerVad {
             padded: true,
             segments: vec![],
             // buffer: vec![],
+            input_key: "input".to_string(),
+            sr_key: "sr".to_string(),
+            state_key: "state".to_string(),
         }
     }
 
@@ -311,7 +326,8 @@ impl InnerVad {
         let model_file = model_file.as_ref();
         let model = if model_file.is_empty() {
             let api = Api::new().map_err(|e| Error::Msg(format!("Api Error: {}", e)))?;
-            let model_path = api.model(DEFAULT_MODEL_NAME.into())
+            let model_path = api
+                .model(DEFAULT_MODEL_NAME.into())
                 .get(DEFAULT_MODEL_FILE)
                 .map_err(|e| Error::Msg(format!("Download Error: {}", e)))?;
             candle_onnx::read_file(model_path)?
@@ -323,7 +339,7 @@ impl InnerVad {
     }
 
     fn reset(&mut self) -> candle_core::Result<()> {
-        let device = Device::Cpu; 
+        let device = Device::Cpu;
         let sr = Tensor::new(self.sample_rate as i64, &device)?;
         let previous = Tensor::zeros((2, 1, 128), DType::F32, &device)?;
         let context = Tensor::zeros((1, self.context_size), DType::F32, &device)?;
@@ -347,76 +363,57 @@ impl InnerVad {
             return None;
         }
         if self.segments.len() == 1 && !self.padded {
-             return None;
+            return None;
         }
         let segment = self.segments.remove(0);
         self.tail = segment.1;
         Some(segment)
     }
-    
+
     fn is_idle(&self) -> bool {
         self.segments.is_empty() && !self.triggered
     }
 
     fn inputs(&self, chunk: Tensor) -> HashMap<String, Tensor> {
         HashMap::from_iter([
-            ("input".to_string(), chunk),
-            ("sr".to_string(), self.state[0].clone()),
-            ("state".to_string(), self.state[1].clone()),
+            (self.input_key.clone(), chunk),
+            (self.sr_key.clone(), self.state[0].clone()),
+            (self.state_key.clone(), self.state[1].clone()),
         ])
     }
 
     fn update_state(&mut self, output: &Tensor, context: Tensor) {
-        // 將輸出從計算圖中分離，防止記憶體堆積和釋放時的堆疊溢位
-        // 如果 detach() 不可用，我們可以重新建立 tensor。
-        // 檢查是否可 detach?
-        // 假設需要斷開圖。
-        // 這裡使用安全的方法：複製數據。
-        // 雖然效率稍低，但安全。
-        // 且對於 128 個浮點數來說，開銷可以忽略不計。
-        let device = output.device();
-        let dims = output.dims();
-        // 展平為 vec 並重新建立
-        // 這保證斷開了圖。
-        if let Ok(data) = output.flatten_all().and_then(|t| t.to_vec1::<f32>()) {
-             if let Ok(new_tensor) = Tensor::from_vec(data, dims, device) {
-                 self.state[1] = new_tensor;
-             } else {
-                 // 如果重新建立失敗（不太可能），保持原樣但警告？
-                 // 或者直接 clone（有崩潰風險）。
-                 self.state[1] = output.clone();
-             }
-        } else {
-             self.state[1] = output.clone();
-        }
-        
-        self.state[2] = context;
+        self.state[1] = output.detach();
+        self.state[2] = context.detach();
     }
 
     fn feed_chunk(&mut self, mut chunk: Vec<f32>) -> candle_core::Result<f32> {
         let device = Device::Cpu;
         self.head += chunk.len();
-        
+
         if chunk.len() < self.chunk_size {
             chunk.resize(self.chunk_size, 0f32);
         } else {
             chunk.truncate(self.chunk_size);
         }
-        
+
         let chunk_size = self.chunk_size;
         let context_size = self.context_size;
-        
+
         let next_context = Tensor::from_slice(
             &chunk[chunk_size - context_size..],
             (1, context_size),
             &device,
         )?;
-        
+
         let chunk_tensor = Tensor::from_vec(chunk, (1, chunk_size), &device)?;
         let chunk_input = Tensor::cat(&[&self.state[2], &chunk_tensor], 1)?;
-        
-        let model = self.model.as_ref().ok_or_else(|| Error::Msg("Model not loaded".into()))?;
-        
+
+        let model = self
+            .model
+            .as_ref()
+            .ok_or_else(|| Error::Msg("Model not loaded".into()))?;
+
         let out = candle_onnx::simple_eval(model, self.inputs(chunk_input))?;
         let out_names = &model.graph.as_ref().unwrap().output;
         let output = out.get(&out_names[0].name).unwrap().clone();
@@ -424,7 +421,7 @@ impl InnerVad {
 
         let output_vec = output.flatten_all()?.to_vec1::<f32>()?;
         let prob = output_vec[0];
-        
+
         self.make_segment(prob);
         Ok(prob)
     }
@@ -445,9 +442,9 @@ impl InnerVad {
                 return;
             }
         }
-        
+
         if self.triggered && offset - self.current_start > self.max_speech {
-             if self.prev_end > 0 {
+            if self.prev_end > 0 {
                 self.current_end = self.prev_end;
                 self.push_segment();
                 if self.next_start < self.prev_end {
@@ -468,7 +465,7 @@ impl InnerVad {
                 return;
             }
         }
-        
+
         if self.triggered && prob < self.neg_threshold {
             if self.temp_end == 0 {
                 self.temp_end = offset;
@@ -492,7 +489,7 @@ impl InnerVad {
                 return;
             }
         }
-        
+
         self.finish_padding(false);
     }
 
@@ -548,17 +545,16 @@ impl InnerVad {
         self.finish_padding(true);
         self.padded = true;
         self.triggered = false;
-        
+
         self.current_start = 0;
         self.current_end = 0;
         self.prev_end = 0;
         self.next_start = 0;
         self.temp_end = 0;
         self.tail = self.head;
-        
-        let device = Device::Cpu;
-        self.state[1] = Tensor::zeros((2, 1, 128), DType::F32, &device)?;
-        self.state[2] = Tensor::zeros((1, self.context_size), DType::F32, &device)?;
+
+        self.state[1] = Tensor::zeros_like(&self.state[1])?;
+        self.state[2] = Tensor::zeros_like(&self.state[2])?;
 
         Ok(&self.segments)
     }
@@ -578,11 +574,8 @@ impl InnerVad {
 }
 
 struct AudioBuffer {
-    queue: VecDeque<Vec<f32>>,
-    length: usize, 
-    start: usize, 
-    offset: usize, 
-    // sample_rate: usize, // 移除未使用的欄位
+    queue: VecDeque<f32>,
+    start: usize, // The absolute index of the first sample in the queue
 }
 
 struct SegmentData {
@@ -590,75 +583,42 @@ struct SegmentData {
 }
 
 impl AudioBuffer {
-    fn new(_sample_rate: usize) -> Self {
+    fn new(_sample_rate: usize, capacity: usize) -> Self {
         AudioBuffer {
-            queue: VecDeque::new(),
-            length: 0,
+            queue: VecDeque::with_capacity(capacity),
             start: 0,
-            offset: 0,
-            // sample_rate,
         }
     }
 
-    fn input(&mut self, audio: Vec<f32>) {
-        self.length += audio.len();
-        self.queue.push_back(audio);
+    fn input(&mut self, audio: &[f32]) {
+        self.queue.extend(audio.iter());
     }
-    
+
     // Prune data older than threshold
     fn prune(&mut self, threshold_start: usize) {
-        // 丟棄 chunk_end <= threshold_start 的區塊
-        // self.start 追蹤 queue[0] 的起始位置。
-        while !self.queue.is_empty() {
-            let first_len = self.queue[0].len();
-            if self.start + first_len <= threshold_start {
-                self.start += first_len;
-                self.queue.pop_front();
-                self.length -= first_len;
-                self.offset = 0;
-            } else {
-                break;
-            }
+        if threshold_start > self.start {
+            let to_remove = threshold_start - self.start;
+            let to_remove = std::cmp::min(to_remove, self.queue.len());
+            self.queue.drain(0..to_remove);
+            self.start += to_remove;
         }
     }
 
     fn output(&mut self, from: usize, to: usize) -> Option<SegmentData> {
-        if self.queue.is_empty() || from < self.start + self.offset || to > self.start + self.length {
+        if from < self.start {
             return None;
         }
-        let chunk_size = to - from;
-        let mut extracted = Vec::with_capacity(chunk_size);
-        let mut needed = chunk_size;
-        let mut temp_start = self.start;
-        
-        // 迭代查找並提取數據
-        for chunk in &self.queue {
-            let chunk_len = chunk.len();
-            let chunk_end = temp_start + chunk_len;
-            
-            // 如果這個 chunk 包含我們需要的數據（完全或部分）
-            if chunk_end > from {
-                // 計算在該 chunk 內的起始和結束索引
-                let start_in_chunk = if from > temp_start { from - temp_start } else { 0 };
-                // 我們需要的長度是 needed，所以最多讀取到 start_in_chunk + needed
-                // 但不能超過 chunk 的長度
-                let len_to_read = std::cmp::min(needed, chunk_len - start_in_chunk);
-                let end_in_chunk = start_in_chunk + len_to_read;
-                
-                if start_in_chunk < end_in_chunk {
-                     extracted.extend_from_slice(&chunk[start_in_chunk..end_in_chunk]);
-                     needed -= len_to_read;
-                }
-            }
-            
-            temp_start += chunk_len;
-            if needed == 0 { break; }
+
+        let relative_start = from - self.start;
+        let len = to - from;
+
+        if relative_start + len > self.queue.len() {
+            return None;
         }
-        
-        if extracted.len() != chunk_size {
-             return None; 
-        }
-        
+
+        let mut extracted = Vec::with_capacity(len);
+        extracted.extend(self.queue.iter().skip(relative_start).take(len));
+
         Some(SegmentData { audio: extracted })
     }
 }

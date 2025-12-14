@@ -28,8 +28,9 @@ candle-core = "0.9.1"
 candle-onnx = "0.9.1"
 
 [dev-dependencies]
-tokio = { version = "1.42", features = ["full"] }
+tokio = { version = "1.48.0", features = ["full"] }
 futures = "0.3.31"
+criterion = "0.8.1"
 
 [features]
 default = []
@@ -44,3 +45,7 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
+
+[[bench]]
+name = "basic_benchmark"
+harness = false

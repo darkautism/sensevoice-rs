@@ -542,7 +542,7 @@ impl SenseVoiceSmall {
                     VadOutput::Segment(segment) => {
                         let vt = self.recognition(&segment)?;
                         ret.push(vt);
-                    },
+                    }
                     VadOutput::SilenceNotification => {
                         // For batch infer, usually we don't need intermediate notifications,
                         // but if configured in vad_config, we respect it.
@@ -563,7 +563,7 @@ impl SenseVoiceSmall {
                 VadOutput::Segment(segment) => {
                     let vt = self.recognition(&segment)?;
                     ret.push(vt);
-                },
+                }
                 VadOutput::SilenceNotification => {
                     // Should not happen in finish usually, but handle it
                     ret.push(VoiceText {
