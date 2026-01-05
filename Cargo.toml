@@ -27,7 +27,7 @@ async-stream = { version = "0.3.6", optional = true }
 ort = { version = "2.0.0-rc.10", features = ["ndarray", "load-dynamic"] }
 
 [dev-dependencies]
-tokio = { version = "1.36", features = ["full"] }
+tokio = { version = "1.49", features = ["full"] }
 futures = "0.3.31"
 
 [features]
