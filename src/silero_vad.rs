@@ -1,6 +1,131 @@
-use std::collections::VecDeque;
-use voice_activity_detector::{IteratorExt, VoiceActivityDetector};
+use std::collections::{HashMap, VecDeque};
+
+use candle::{DType, Device, Tensor};
+use hf_hub::api::sync::Api;
+
+use crate::wavfrontend::{WavFrontend, WavFrontendConfig};
+
 pub const CHUNK_SIZE: usize = 512;
+const FSMN_VAD_REPO: &str = "funasr/fsmn-vad-onnx";
+
+struct FsmnVadModel {
+    model: candle_onnx::onnx::ModelProto,
+    frontend: WavFrontend,
+    cache0: Tensor,
+    cache1: Tensor,
+    cache2: Tensor,
+    cache3: Tensor,
+}
+
+impl std::fmt::Debug for FsmnVadModel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FsmnVadModel").finish()
+    }
+}
+
+impl FsmnVadModel {
+    fn new(config: &VadConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        if config.sample_rate != 16000 {
+            return Err(std::io::Error::other("FSMN-VAD currently supports 16k sample rate").into());
+        }
+
+        let api = Api::new()?;
+        let repo = api.model(FSMN_VAD_REPO.to_owned());
+        let model_path = repo.get("model.onnx")?;
+        let cmvn_path = repo.get("vad.mvn")?;
+
+        let frontend = WavFrontend::new(WavFrontendConfig {
+            sample_rate: config.sample_rate as i32,
+            lfr_m: 5,
+            lfr_n: 1,
+            cmvn_file: Some(cmvn_path.to_string_lossy().to_string()),
+            ..Default::default()
+        })?;
+
+        let model = candle_onnx::read_file(model_path)?;
+        let cache = Tensor::zeros((1usize, 128usize, 19usize, 1usize), DType::F32, &Device::Cpu)?;
+
+        Ok(Self {
+            model,
+            frontend,
+            cache0: cache.clone(),
+            cache1: cache.clone(),
+            cache2: cache.clone(),
+            cache3: cache,
+        })
+    }
+
+    fn predict_probability(
+        &mut self,
+        chunk: &[i16; CHUNK_SIZE],
+    ) -> Result<f32, Box<dyn std::error::Error>> {
+        let feats = self.frontend.extract_features(chunk)?;
+        let t = feats.shape()[0];
+        let d = feats.shape()[1];
+        if d != 400 {
+            return Err(std::io::Error::other(format!(
+                "FSMN-VAD expects feature dim 400, got {d}"
+            ))
+            .into());
+        }
+
+        let speech = Tensor::from_vec(
+            feats.iter().copied().collect::<Vec<f32>>(),
+            (1usize, t, d),
+            &Device::Cpu,
+        )?;
+
+        let mut inputs = HashMap::new();
+        inputs.insert("speech".to_string(), speech);
+        inputs.insert("in_cache0".to_string(), self.cache0.clone());
+        inputs.insert("in_cache1".to_string(), self.cache1.clone());
+        inputs.insert("in_cache2".to_string(), self.cache2.clone());
+        inputs.insert("in_cache3".to_string(), self.cache3.clone());
+
+        let mut outputs = candle_onnx::simple_eval(&self.model, inputs)?;
+        self.cache0 = outputs
+            .remove("out_cache0")
+            .ok_or_else(|| std::io::Error::other("Missing out_cache0 from FSMN-VAD output"))?;
+        self.cache1 = outputs
+            .remove("out_cache1")
+            .ok_or_else(|| std::io::Error::other("Missing out_cache1 from FSMN-VAD output"))?;
+        self.cache2 = outputs
+            .remove("out_cache2")
+            .ok_or_else(|| std::io::Error::other("Missing out_cache2 from FSMN-VAD output"))?;
+        self.cache3 = outputs
+            .remove("out_cache3")
+            .ok_or_else(|| std::io::Error::other("Missing out_cache3 from FSMN-VAD output"))?;
+
+        let logits = outputs
+            .remove("logits")
+            .ok_or_else(|| std::io::Error::other("Missing logits from FSMN-VAD output"))?;
+
+        let dims = logits.dims();
+        if dims.len() != 3 || dims[0] != 1 || dims[2] == 0 {
+            return Err(std::io::Error::other(format!(
+                "Unexpected FSMN-VAD logits shape: {:?}",
+                dims
+            ))
+            .into());
+        }
+
+        let frames = dims[1];
+        let classes = dims[2];
+        if frames == 0 {
+            return Ok(0.0);
+        }
+
+        let data = logits.flatten_all()?.to_vec1::<f32>()?;
+        let mut speech_prob_sum = 0f32;
+        for frame_idx in 0..frames {
+            // class-0 is silence in FunASR FSMN-VAD config (sil_pdf_ids: [0])
+            let silence_prob = data[frame_idx * classes];
+            speech_prob_sum += (1.0 - silence_prob).clamp(0.0, 1.0);
+        }
+
+        Ok(speech_prob_sum / frames as f32)
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct VadConfig {
@@ -42,7 +167,7 @@ pub enum VadOutput {
 
 #[derive(Debug)]
 pub struct VadProcessor {
-    vad: VoiceActivityDetector,
+    vad: FsmnVadModel,
     config: VadConfig,
     state: VadState,
     current_segment: Vec<i16>,
@@ -55,10 +180,7 @@ pub struct VadProcessor {
 
 impl VadProcessor {
     pub fn new(config: VadConfig) -> Result<Self, Box<dyn std::error::Error>> {
-        let vad = VoiceActivityDetector::builder()
-            .sample_rate(config.sample_rate)
-            .chunk_size(CHUNK_SIZE)
-            .build()?;
+        let vad = FsmnVadModel::new(&config)?;
         Ok(Self {
             vad,
             config,
@@ -75,29 +197,22 @@ impl VadProcessor {
     /// 更新通知靜音的設定
     pub fn set_notify_silence_after_ms(&mut self, ms: Option<u32>) {
         self.config.notify_silence_after_ms = ms;
-        // 如果關閉了通知，重置狀態以防萬一
         if ms.is_none() {
             self.notified_silence = false;
         }
-        // 如果開啟了且當前累積已超過，下一次 process_chunk 會觸發
     }
 
     pub fn process_chunk(&mut self, chunk: &[i16; CHUNK_SIZE]) -> Option<VadOutput> {
         let chunk_duration_ms = (CHUNK_SIZE as f32 / self.config.sample_rate as f32) * 1000.0;
-        let probability = chunk
-            .iter()
-            .copied()
-            .predict(&mut self.vad)
-            .next()
-            .unwrap()
-            .1;
+        let probability = self
+            .vad
+            .predict_probability(chunk)
+            .expect("FSMN VAD inference failed");
 
         match self.state {
             VadState::Waiting => {
-                // 將塊加入歷史緩衝區
                 self.history_buffer.extend(chunk.iter().copied());
 
-                // 維護緩衝區大小 (rollback_duration)
                 let rollback_samples = ((self.config.rollback_duration_ms as f32 / 1000.0)
                     * self.config.sample_rate as f32) as usize;
                 while self.history_buffer.len() > rollback_samples {
@@ -105,26 +220,19 @@ impl VadProcessor {
                 }
 
                 if probability > self.config.speech_threshold {
-                    // 檢測到語音，切換到 Recording 狀態
                     self.state = VadState::Recording;
-                    // 將歷史緩衝區的內容移動到當前段（保留語音開頭的上下文）
                     self.current_segment.extend(self.history_buffer.iter());
-                    self.history_buffer.clear(); // 清空緩衝區
+                    self.history_buffer.clear();
                     self.silence_chunks = 0;
                     self.speech_chunks = 0;
-
-                    // 重置 Waiting 相關計數
                     self.waiting_dropped_chunks = 0;
                     self.notified_silence = false;
-                } else {
-                    // 仍在等待，檢查是否需要發出靜音通知
-                    if let Some(limit_ms) = self.config.notify_silence_after_ms {
-                        self.waiting_dropped_chunks += 1;
-                        let dropped_duration = self.waiting_dropped_chunks as f32 * chunk_duration_ms;
-                        if dropped_duration >= limit_ms as f32 && !self.notified_silence {
-                            self.notified_silence = true;
-                            return Some(VadOutput::SilenceNotification);
-                        }
+                } else if let Some(limit_ms) = self.config.notify_silence_after_ms {
+                    self.waiting_dropped_chunks += 1;
+                    let dropped_duration = self.waiting_dropped_chunks as f32 * chunk_duration_ms;
+                    if dropped_duration >= limit_ms as f32 && !self.notified_silence {
+                        self.notified_silence = true;
+                        return Some(VadOutput::SilenceNotification);
                     }
                 }
                 None
@@ -135,18 +243,14 @@ impl VadProcessor {
 
                 if probability > self.config.speech_threshold {
                     self.silence_chunks = 0;
-                    // 檢查是否超過最大語音長度
                     let speech_duration_ms = self.speech_chunks as f32 * chunk_duration_ms;
                     if speech_duration_ms >= self.config.max_speech_duration_ms as f32 {
-                        // 強制切斷
                         return self.finalize_segment(false);
                     }
                 } else {
                     self.silence_chunks += 1;
                     let silence_duration_ms = self.silence_chunks as f32 * chunk_duration_ms;
                     if silence_duration_ms >= self.config.silence_duration_ms as f32 {
-                        // 靜音時間過長，結束當前段
-                        // 並修剪掉尾部的靜音
                         return self.finalize_segment(true);
                     }
                 }
@@ -155,7 +259,6 @@ impl VadProcessor {
         }
     }
 
-    // trim_tail: 是否修剪尾部的靜音
     fn finalize_segment(&mut self, trim_tail: bool) -> Option<VadOutput> {
         if self.current_segment.is_empty() {
             self.reset();
@@ -163,12 +266,11 @@ impl VadProcessor {
         }
 
         let mut segment = if trim_tail {
-            // 計算需要修剪的樣本數
             let chunk_len = CHUNK_SIZE;
             let silence_len = (self.silence_chunks as usize) * chunk_len;
             let valid_len = self.current_segment.len().saturating_sub(silence_len);
             if valid_len == 0 {
-                Vec::new() // 全是靜音？
+                Vec::new()
             } else {
                 self.current_segment[..valid_len].to_vec()
             }
@@ -176,12 +278,9 @@ impl VadProcessor {
             self.current_segment.clone()
         };
 
-        // 最小長度檢查
-        let duration_ms =
-            (segment.len() as f32 / self.config.sample_rate as f32) * 1000.0;
+        let duration_ms = (segment.len() as f32 / self.config.sample_rate as f32) * 1000.0;
         if duration_ms < self.config.min_speech_duration_ms as f32 {
-            // 語音太短，視為噪音丟棄
-            segment.clear(); // 清空以確保返回 None
+            segment.clear();
         }
 
         self.reset();
@@ -199,20 +298,18 @@ impl VadProcessor {
         self.silence_chunks = 0;
         self.speech_chunks = 0;
         self.state = VadState::Waiting;
-        // 重置 waiting 狀態
         self.waiting_dropped_chunks = 0;
         self.notified_silence = false;
     }
 
     pub fn finish(&mut self) -> Option<VadOutput> {
-        // 如果還在 Recording 狀態，返回剩餘內容
         if !self.current_segment.is_empty() {
-             // 對於最後一段，我們也要做最小長度檢查
-             let duration_ms = (self.current_segment.len() as f32 / self.config.sample_rate as f32) * 1000.0;
-             if duration_ms < self.config.min_speech_duration_ms as f32 {
-                 self.reset();
-                 return None;
-             }
+            let duration_ms =
+                (self.current_segment.len() as f32 / self.config.sample_rate as f32) * 1000.0;
+            if duration_ms < self.config.min_speech_duration_ms as f32 {
+                self.reset();
+                return None;
+            }
 
             let segment = self.current_segment.clone();
             self.reset();

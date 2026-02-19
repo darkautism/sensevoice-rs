@@ -1,6 +1,6 @@
 # SenseVoiceSmall [![dependency status](https://deps.rs/repo/github/darkautism/sensevoice-rs/status.svg)](https://deps.rs/repo/github/darkautism/sensevoice-rs)
 
-A Rust-based ASR system with dual backends: ONNX Runtime for standard PCs and RKNN for Rockchip NPUs. It runs smoothly on common desktops and laptops, while also supporting low-cost SBC NPUs for accelerated inference.
+A Rust-based ASR system with dual backends: pure-Rust Candle (default non-RKNN path) and RKNN for Rockchip NPUs.
 
 ## Rockchip Installation Only
 
@@ -14,13 +14,15 @@ Then, add the feature gate `rknpu` in your `Cargo.toml`.
 
 ## Installation
 
-Download [ONNX Runtime](https://github.com/microsoft/onnxruntime/releases) and unzip it. Copy `libonnxruntime.so.1.xx.x` and `libonnxruntime.so` into `/lib/`, `lib64/`, `usr/lib/`, or another appropriate library directory.
-
-On Windows, place the DLL files in the same directory as your executable (or working directory).
+No external ONNX Runtime library is required anymore.
 
 ## Usage & Example
 
 This library provides two methods: it can process either an audio file or an audio stream.
+Default VAD now follows the official FSMN-VAD path.
+
+For official `model.pt`, you can use `SenseVoiceSmall::init_official_model_pt(...)` (or pass a `.pt` via `init_with_config`).
+If conversion tooling is available (`funasr-onnx`), the crate will try local export first; otherwise it falls back to a Candle-compatible ONNX mirror model automatically.
 
 See the [examples](examples) directory for more details.
 

@@ -1,26 +1,30 @@
+pub mod asr_candle;
 pub mod config;
+pub mod model_pt;
 pub mod silero_vad;
 pub mod wavfrontend;
 
 use core::fmt;
-use std::sync::Mutex;
 #[cfg(feature = "rknpu")]
 use std::{fs::File, io::BufReader};
 
 use hf_hub::api::sync::Api;
 use hound::WavReader;
-use ndarray::{s, ArrayView3, Axis};
+use ndarray::{s, ArrayView3};
+#[cfg(feature = "rknpu")]
+use ndarray::Axis;
 #[cfg(feature = "rknpu")]
 use ndarray::{Array2, Array3};
 #[cfg(feature = "rknpu")]
 use ndarray_npy::ReadNpyExt;
-use ort::session::builder::GraphOptimizationLevel;
 use regex::Regex;
 #[cfg(feature = "rknpu")]
-use rknn_rs::prelude::{Rknn, RknnInput, RknnTensorFormat, RknnTensorType};
+use rknn_rs::prelude::{Rknn, RknnTensorFormat, RknnTensorType};
 use sentencepiece::SentencePieceProcessor;
 
+use asr_candle::CandleAsrSession;
 use config::SenseVoiceConfig;
+use model_pt::resolve_candle_model_path;
 use silero_vad::{VadConfig, VadOutput, VadProcessor, CHUNK_SIZE};
 use wavfrontend::{WavFrontend, WavFrontendConfig};
 
@@ -324,8 +328,8 @@ pub struct SenseVoiceSmall {
     #[cfg(feature = "rknpu")]
     embedding: Option<ndarray::Array2<f32>>,
 
-    // ONNX specific fields
-    ort_session: Option<Mutex<ort::session::Session>>,
+    // Candle ONNX runtime field
+    candle_asr: Option<CandleAsrSession>,
 
     // VAD
     vad_config: VadConfig,
@@ -415,7 +419,7 @@ impl SenseVoiceSmall {
                 spp,
                 rknn: Some(rknn),
                 embedding: Some(embedding),
-                ort_session: None,
+                candle_asr: None,
                 vad_config: vadconfig,
                 #[cfg(feature = "stream")]
                 silero_vad,
@@ -424,13 +428,12 @@ impl SenseVoiceSmall {
         }
         #[cfg(not(feature = "rknpu"))]
         {
-            // ONNX Path
-            // Use haixuantao/SenseVoiceSmall-onnx
-            let model_repo = "haixuantao/SenseVoiceSmall-onnx";
+            // Candle ONNX path (non-quantized ONNX graph for candle-onnx compatibility)
+            let model_repo = "jaman21/SenseVoiceSmall";
             let api = Api::new().unwrap();
             let repo = api.model(model_repo.to_string());
 
-            let model_path = repo.get("model_quant.onnx")?;
+            let model_path = repo.get("model.onnx")?;
             let tokenizer_path = repo.get("chn_jpn_yue_eng_ko_spectok.bpe.model")?;
             let am_path = repo.get("am.mvn")?;
 
@@ -442,6 +445,23 @@ impl SenseVoiceSmall {
 
             Self::init_with_config(config, vadconfig)
         }
+    }
+
+    /// Initializes using official `FunAudioLLM/SenseVoiceSmall` assets (`model.pt` path).
+    /// The `.pt` model is resolved to a Candle-compatible ONNX path internally.
+    pub fn init_official_model_pt(
+        vadconfig: VadConfig,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let api = Api::new().unwrap();
+        let repo = api.model("FunAudioLLM/SenseVoiceSmall".to_owned());
+
+        let config = SenseVoiceConfig {
+            model_path: repo.get("model.pt")?,
+            tokenizer_path: repo.get("chn_jpn_yue_eng_ko_spectok.bpe.model")?,
+            cmvn_path: Some(repo.get("am.mvn")?),
+        };
+
+        Self::init_with_config(config, vadconfig)
     }
 
     /// Initializes a new `SenseVoiceSmall` instance with custom configuration.
@@ -470,16 +490,10 @@ impl SenseVoiceSmall {
             }
         }
 
-        // ONNX Loading
+        // ASR loading
+        let model_path = resolve_candle_model_path(&config.model_path)?;
         let spp = SentencePieceProcessor::open(&config.tokenizer_path)?;
-
-        // Load ONNX model
-        let ort_session = Mutex::new(
-            ort::session::Session::builder()?
-                .with_optimization_level(GraphOptimizationLevel::Level3)?
-                .with_intra_threads(4)?
-                .commit_from_file(&config.model_path)?,
-        );
+        let candle_asr = CandleAsrSession::new(&model_path)?;
 
         let asr_frontend = WavFrontend::new(WavFrontendConfig {
             lfr_m: 7,
@@ -502,7 +516,7 @@ impl SenseVoiceSmall {
             rknn: None,
             #[cfg(feature = "rknpu")]
             embedding: None,
-            ort_session: Some(ort_session),
+            candle_asr: Some(candle_asr),
             vad_config: vadconfig,
             #[cfg(feature = "stream")]
             silero_vad,
@@ -601,70 +615,16 @@ impl SenseVoiceSmall {
             }
             return Err("RKNN is enabled but model is not initialized".into());
         } else {
-            // ONNX Inference
-            if let Some(session_mutex) = &self.ort_session {
-                let mut session = session_mutex.lock().unwrap();
-                // Prepare inputs for ONNX
-                // Inputs: speech (1, T, 560), language (1), textnorm (1)
-                // Assuming dynamic shape for T
-
-                let seq_len = audio_feats.shape()[0] as i32;
-                let speech = audio_feats.view().insert_axis(Axis(0)); // [1, T, 560]
-
-                // Language: 0 (auto/zn), TextNorm: 15 (woitn/none) or 14 (with itn)
-                // Existing code: "language=0 (auto), use_itn=false" -> text_norm_idx = 15
-                let language_val = 0i32;
-                let textnorm_val = 15i32; // 15 means 'woitn' (without ITN/punctuation?) based on prepare_rknn_input_advanced logic
-
-                let language = ndarray::arr1(&[language_val]);
-                let textnorm = ndarray::arr1(&[textnorm_val]);
-                let speech_lengths = ndarray::arr1(&[seq_len]);
-
-                let speech_tensor = ort::value::Tensor::from_array(speech.to_owned())?;
-                let speech_lengths_tensor =
-                    ort::value::Tensor::from_array(speech_lengths.to_owned())?;
-                let language_tensor = ort::value::Tensor::from_array(language.to_owned())?;
-                let textnorm_tensor = ort::value::Tensor::from_array(textnorm.to_owned())?;
-
-                let inputs = ort::inputs![
-                    "speech" => speech_tensor,
-                    "speech_lengths" => speech_lengths_tensor,
-                    "language" => language_tensor,
-                    "textnorm" => textnorm_tensor,
-                ];
-
-                let outputs = session.run(inputs)?;
-
-                // Output handling
-                // Usually output name is "logits" or similar.
-                // SenseVoice ONNX output is usually [1, V, T] or [1, T, V]?
-                // Let's assume [1, V, T] similar to RKNN or check dimensions.
-
-                // Try to get the first output
-                let (output_shape, output_data) = outputs[0].try_extract_tensor::<f32>()?;
-
-                // The decoding logic `decode_asr_output` expects `[n_vocab, n_seq]` (flattened or reshaped)
-                // The RKNN code does: `ArrayView3::from_shape((1, n_vocab, self.n_seq), output)`
-                // So RKNN output is [1, 25055, 171].
-                // We need to know the shape of ONNX output.
-                // Typically: [Batch, Time, Vocab] or [Batch, Vocab, Time].
-                // If it is [Batch, Time, Vocab], we need to permute or adjust decoding.
-                // SenseVoice (FunASR) usually outputs logits.
-
-                // Debug/Verify shape if possible.
-                // Assuming [1, Time, Vocab] for standard Transformers, but SenseVoice might be different.
-                // If shape is [1, Time, Vocab], we need to adjust decode_asr_output.
-
-                // Let's implement a generic decoder for ONNX output.
-                // Assuming output_shape dereferences to &[i64] or is compatible
-                let asr_text = self.decode_onnx_output(output_data, &output_shape)?;
-
+            if let Some(candle_asr) = &self.candle_asr {
+                let seq_len = audio_feats.shape()[0] as i64;
+                let (output_data, output_shape) = candle_asr.run(&audio_feats, seq_len, 0, 15)?;
+                let asr_text = self.decode_onnx_output(&output_data, &output_shape)?;
                 return match parse_line(&asr_text) {
                     Some(vt) => Ok(vt),
                     None => Err(format!("Parse line failed, text is:{}", asr_text).into()),
                 };
             }
-            return Err("ONNX session is not initialized".into());
+            return Err("Candle ASR session is not initialized".into());
         }
     }
 
@@ -965,13 +925,13 @@ impl SenseVoiceSmall {
             .to_vec(); // Owned Vec<f32>
 
         if let Some(rknn) = &self.rknn {
-            rknn.input_set(&mut RknnInput {
-                index: 0,             // 根據您的輸入索引設定
-                buf: flattened_input, /* 您的數據 */
-                pass_through: false,  // 通常設為 false，除非模型需要特殊處理
-                type_: RknnTensorType::Float32,
-                fmt: RknnTensorFormat::NCHW,
-            })?;
+            rknn.input_set_slice(
+                0, // 根據您的輸入索引設定
+                &flattened_input,
+                false, // 通常設為 false，除非模型需要特殊處理
+                RknnTensorType::Float32,
+                RknnTensorFormat::NCHW,
+            )?;
         }
         Ok(())
     }

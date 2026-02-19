@@ -7,33 +7,34 @@ homepage = "https://github.com/darkautism/sensevoice-rs"
 license = "MIT"
 
 [patch.crates-io]
-# rknn-rs = { path = "../rknn-rs/rknn-rs"}
-#voice_activity_detector = { path = "../voice_activity_detector"}
+#rknn-rs = { path = "../rknn-rs/rknn-rs" }
+#rknn-sys-rs = { path = "../rknn-rs/rknn-sys-rs" }
+candle-onnx = { path = "../candle/candle-onnx" }
+candle-core = { path = "../candle/candle-core" }
+candle-nn = { path = "../candle/candle-nn" }
 
 [dependencies]
 kaldi-fbank-rust-kautism = "0.1.0"
-rknn-rs = { version = "0.2.0", optional = true }
+rknn-rs = { version = "0.2.1", optional = true }
 hound = "3.5.1"
-ndarray = { version="0.16.1", features=["rayon"]}
-ndarray-npy = "0.9.1"
-sentencepiece = "0.12.0"
-ndarray-stats = "0.6.0"
+ndarray = { version="0.17.2", features=["rayon"]}
+ndarray-npy = "0.10.0"
+sentencepiece = "0.13.1"
+ndarray-stats = "0.7.0"
 rayon = "1.11.0"
 hf-hub = "0.4.3"
-regex = "1.12.2"
-voice_activity_detector = "0.2.1"
-futures = { version = "0.3.31", optional = true }
+regex = "1.12.3"
+futures = { version = "0.3.32", optional = true }
 async-stream = { version = "0.3.6", optional = true }
-ort = { version = "2.0.0-rc.10", features = ["ndarray", "load-dynamic"] }
+candle = { package = "candle-core", version = "0.9.2" }
+candle-nn = "0.9.2"
+candle-onnx = "0.9.2"
 
 [dev-dependencies]
-tokio = { version = "1.36", features = ["full"] }
-futures = "0.3.31"
+tokio = { version = "1.49.0", features = ["full"] }
+futures = "0.3.32"
 
 [features]
 default = ["rknpu"]
 stream = ["futures", "async-stream"]
 rknpu = ["dep:rknn-rs"]
-
-[target.'cfg(target_os = "macos")'.dependencies]
-ort = { version = "2.0.0-rc.10", features = ["coreml", "ndarray", "load-dynamic"] }
