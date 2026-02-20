@@ -6,13 +6,6 @@ description = "A Rust-based, SenseVoiceSmall "
 homepage = "https://github.com/darkautism/sensevoice-rs"
 license = "MIT"
 
-[patch.crates-io]
-#rknn-rs = { path = "../rknn-rs/rknn-rs" }
-#rknn-sys-rs = { path = "../rknn-rs/rknn-sys-rs" }
-candle-onnx = { path = "../candle/candle-onnx" }
-candle-core = { path = "../candle/candle-core" }
-candle-nn = { path = "../candle/candle-nn" }
-
 [dependencies]
 kaldi-fbank-rust-kautism = "0.1.0"
 rknn-rs = { version = "0.2.1", optional = true }
@@ -28,7 +21,6 @@ futures = { version = "0.3.32", optional = true }
 async-stream = { version = "0.3.6", optional = true }
 candle = { package = "candle-core", version = "0.9.2" }
 candle-nn = "0.9.2"
-candle-onnx = "0.9.2"
 
 [dev-dependencies]
 tokio = { version = "1.49.0", features = ["full"] }

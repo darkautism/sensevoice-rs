@@ -1,6 +1,6 @@
 # SenseVoiceSmall [![dependency status](https://deps.rs/repo/github/darkautism/sensevoice-rs/status.svg)](https://deps.rs/repo/github/darkautism/sensevoice-rs)
 
-A Rust-based ASR system with dual backends: pure-Rust Candle (default non-RKNN path) and RKNN for Rockchip NPUs.
+A Pure Rust speech recognition library, using Candle for the non-RKNN runtime and RKNN for Rockchip NPU runtime.
 
 ## Rockchip Installation Only
 
@@ -12,17 +12,20 @@ sudo curl -L https://github.com/airockchip/rknn-toolkit2/raw/refs/heads/master/r
 
 Then, add the feature gate `rknpu` in your `Cargo.toml`.
 
-## Installation
+## Runtime Notes
 
-No external ONNX Runtime library is required anymore.
+- Pure Rust ASR path: Candle + official `model.pt` (native PT loading).
+- VAD path: Candle + official `funasr/fsmn-vad` `model.pt` (auto-downloaded by hf-hub).
+- RKNN path: keep `rknpu` backend for Rockchip NPU.
+- No external ONNX Runtime (`ort`) library is required.
 
 ## Usage & Example
 
 This library provides two methods: it can process either an audio file or an audio stream.
 Default VAD now follows the official FSMN-VAD path.
 
-For official `model.pt`, you can use `SenseVoiceSmall::init_official_model_pt(...)` (or pass a `.pt` via `init_with_config`).
-If conversion tooling is available (`funasr-onnx`), the crate will try local export first; otherwise it falls back to a Candle-compatible ONNX mirror model automatically.
+For official `model.pt`, use `SenseVoiceSmall::init_official_model_pt(...)` (or pass a `.pt` via `init_with_config`).
+The Candle ASR runtime now expects `.pt` directly.
 
 See the [examples](examples) directory for more details.
 

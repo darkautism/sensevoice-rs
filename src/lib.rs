@@ -1,6 +1,5 @@
-pub mod asr_candle;
+pub mod asr_candle_pt;
 pub mod config;
-pub mod model_pt;
 pub mod silero_vad;
 pub mod wavfrontend;
 
@@ -10,9 +9,9 @@ use std::{fs::File, io::BufReader};
 
 use hf_hub::api::sync::Api;
 use hound::WavReader;
-use ndarray::{s, ArrayView3};
 #[cfg(feature = "rknpu")]
 use ndarray::Axis;
+use ndarray::{s, ArrayView3};
 #[cfg(feature = "rknpu")]
 use ndarray::{Array2, Array3};
 #[cfg(feature = "rknpu")]
@@ -22,9 +21,8 @@ use regex::Regex;
 use rknn_rs::prelude::{Rknn, RknnTensorFormat, RknnTensorType};
 use sentencepiece::SentencePieceProcessor;
 
-use asr_candle::CandleAsrSession;
+use asr_candle_pt::CandlePtAsrSession;
 use config::SenseVoiceConfig;
-use model_pt::resolve_candle_model_path;
 use silero_vad::{VadConfig, VadOutput, VadProcessor, CHUNK_SIZE};
 use wavfrontend::{WavFrontend, WavFrontendConfig};
 
@@ -314,7 +312,7 @@ impl SenseVoiceSmallError {
 /// Represents the core structure for the SenseVoiceSmall speech recognition system.
 ///
 /// This structure manages components such as voice activity detection (VAD), automatic speech recognition (ASR),
-/// and inference (RKNN or ONNX) for processing audio data.
+/// and inference backends (RKNN or Candle) for processing audio data.
 #[derive(Debug)]
 pub struct SenseVoiceSmall {
     asr_frontend: WavFrontend,
@@ -328,8 +326,7 @@ pub struct SenseVoiceSmall {
     #[cfg(feature = "rknpu")]
     embedding: Option<ndarray::Array2<f32>>,
 
-    // Candle ONNX runtime field
-    candle_asr: Option<CandleAsrSession>,
+    candle_pt_asr: Option<CandlePtAsrSession>,
 
     // VAD
     vad_config: VadConfig,
@@ -348,7 +345,7 @@ impl SenseVoiceSmall {
     /// Initializes a new `SenseVoiceSmall` instance.
     ///
     /// If the `rknpu` feature is enabled, it initializes the RKNN backend using the default RKNN model.
-    /// Otherwise, it initializes the ONNX backend using the default ONNX model.
+    /// Otherwise, it initializes the Candle backend using the official `model.pt`.
     ///
     /// # Arguments
     ///
@@ -407,19 +404,13 @@ impl SenseVoiceSmall {
             #[cfg(feature = "stream")]
             let silero_vad = VadProcessor::new(vadconfig)?;
 
-            // We need a dummy WavFrontend for the struct if we don't remove the field?
-            // I will remove the field `vad_frontend` in the struct definition update below/above.
-            // So here I construct without it.
-            // But wait, `WavFrontend` struct is still there.
-            // Let's assume I removed it from struct.
-
             Ok(SenseVoiceSmall {
                 asr_frontend,
                 n_seq,
                 spp,
                 rknn: Some(rknn),
                 embedding: Some(embedding),
-                candle_asr: None,
+                candle_pt_asr: None,
                 vad_config: vadconfig,
                 #[cfg(feature = "stream")]
                 silero_vad,
@@ -428,27 +419,12 @@ impl SenseVoiceSmall {
         }
         #[cfg(not(feature = "rknpu"))]
         {
-            // Candle ONNX path (non-quantized ONNX graph for candle-onnx compatibility)
-            let model_repo = "jaman21/SenseVoiceSmall";
-            let api = Api::new().unwrap();
-            let repo = api.model(model_repo.to_string());
-
-            let model_path = repo.get("model.onnx")?;
-            let tokenizer_path = repo.get("chn_jpn_yue_eng_ko_spectok.bpe.model")?;
-            let am_path = repo.get("am.mvn")?;
-
-            let config = SenseVoiceConfig {
-                model_path,
-                tokenizer_path,
-                cmvn_path: Some(am_path),
-            };
-
-            Self::init_with_config(config, vadconfig)
+            Self::init_official_model_pt(vadconfig)
         }
     }
 
     /// Initializes using official `FunAudioLLM/SenseVoiceSmall` assets (`model.pt` path).
-    /// The `.pt` model is resolved to a Candle-compatible ONNX path internally.
+    /// This uses the native Candle PT backend.
     pub fn init_official_model_pt(
         vadconfig: VadConfig,
     ) -> Result<Self, Box<dyn std::error::Error>> {
@@ -490,10 +466,21 @@ impl SenseVoiceSmall {
             }
         }
 
-        // ASR loading
-        let model_path = resolve_candle_model_path(&config.model_path)?;
+        let is_pt_model = config
+            .model_path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("pt"))
+            .unwrap_or(false);
+        if !is_pt_model {
+            return Err(std::io::Error::other(
+                "Candle ASR now only supports official .pt model paths.",
+            )
+            .into());
+        }
+        let candle_pt_asr = Some(CandlePtAsrSession::new(&config.model_path)?);
+
         let spp = SentencePieceProcessor::open(&config.tokenizer_path)?;
-        let candle_asr = CandleAsrSession::new(&model_path)?;
 
         let asr_frontend = WavFrontend::new(WavFrontendConfig {
             lfr_m: 7,
@@ -516,7 +503,7 @@ impl SenseVoiceSmall {
             rknn: None,
             #[cfg(feature = "rknpu")]
             embedding: None,
-            candle_asr: Some(candle_asr),
+            candle_pt_asr,
             vad_config: vadconfig,
             #[cfg(feature = "stream")]
             silero_vad,
@@ -556,7 +543,7 @@ impl SenseVoiceSmall {
                     VadOutput::Segment(segment) => {
                         let vt = self.recognition(&segment)?;
                         ret.push(vt);
-                    },
+                    }
                     VadOutput::SilenceNotification => {
                         // For batch infer, usually we don't need intermediate notifications,
                         // but if configured in vad_config, we respect it.
@@ -577,7 +564,7 @@ impl SenseVoiceSmall {
                 VadOutput::Segment(segment) => {
                     let vt = self.recognition(&segment)?;
                     ret.push(vt);
-                },
+                }
                 VadOutput::SilenceNotification => {
                     // Should not happen in finish usually, but handle it
                     ret.push(VoiceText {
@@ -615,16 +602,17 @@ impl SenseVoiceSmall {
             }
             return Err("RKNN is enabled but model is not initialized".into());
         } else {
-            if let Some(candle_asr) = &self.candle_asr {
-                let seq_len = audio_feats.shape()[0] as i64;
-                let (output_data, output_shape) = candle_asr.run(&audio_feats, seq_len, 0, 15)?;
-                let asr_text = self.decode_onnx_output(&output_data, &output_shape)?;
-                return match parse_line(&asr_text) {
-                    Some(vt) => Ok(vt),
-                    None => Err(format!("Parse line failed, text is:{}", asr_text).into()),
-                };
-            }
-            return Err("Candle ASR session is not initialized".into());
+            let seq_len = audio_feats.shape()[0] as i64;
+            let candle_pt_asr = self
+                .candle_pt_asr
+                .as_ref()
+                .ok_or_else(|| std::io::Error::other("Candle ASR session is not initialized"))?;
+            let (output_data, output_shape) = candle_pt_asr.run(&audio_feats, seq_len, 0, 15)?;
+            let asr_text = self.decode_onnx_output(&output_data, &output_shape)?;
+            return match parse_line(&asr_text) {
+                Some(vt) => Ok(vt),
+                None => Err(format!("Parse line failed, text is:{}", asr_text).into()),
+            };
         }
     }
 

@@ -1,20 +1,67 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 
 use candle::{DType, Device, Tensor};
+use candle_nn::{linear, linear_no_bias, ops::softmax_last_dim, Linear, Module, VarBuilder};
 use hf_hub::api::sync::Api;
 
 use crate::wavfrontend::{WavFrontend, WavFrontendConfig};
 
 pub const CHUNK_SIZE: usize = 512;
-const FSMN_VAD_REPO: &str = "funasr/fsmn-vad-onnx";
+const FSMN_VAD_REPO: &str = "funasr/fsmn-vad";
+const FSMN_VAD_LAYERS: usize = 4;
+const FSMN_VAD_PROJ_DIM: usize = 128;
+const FSMN_VAD_CACHE_FRAMES: usize = 19;
+
+struct FsmnVadBlock {
+    linear: Linear,
+    affine: Linear,
+    conv_left_weight: Tensor,
+}
+
+impl FsmnVadBlock {
+    fn new(vb: VarBuilder) -> Result<Self, Box<dyn std::error::Error>> {
+        let linear_layer = linear_no_bias(250, FSMN_VAD_PROJ_DIM, vb.pp("linear").pp("linear"))?;
+        let affine = linear(FSMN_VAD_PROJ_DIM, 250, vb.pp("affine").pp("linear"))?;
+        let conv_left_weight = vb
+            .pp("fsmn_block")
+            .pp("conv_left")
+            .get((FSMN_VAD_PROJ_DIM, 1, 20, 1), "weight")?;
+        Ok(Self {
+            linear: linear_layer,
+            affine,
+            conv_left_weight,
+        })
+    }
+
+    fn forward(
+        &self,
+        input: &Tensor,
+        cache: &Tensor,
+    ) -> Result<(Tensor, Tensor), Box<dyn std::error::Error>> {
+        let x = self.linear.forward(input)?; // [B, T, 128]
+        let x_per = x.unsqueeze(1)?.permute((0, 3, 2, 1))?; // [B, 128, T, 1]
+
+        let y_left = Tensor::cat(&[cache, &x_per], 2)?;
+        let y_left_t = y_left.dim(2)?;
+        let new_cache =
+            y_left.narrow(2, y_left_t - FSMN_VAD_CACHE_FRAMES, FSMN_VAD_CACHE_FRAMES)?;
+
+        let y_left = y_left.conv2d(&self.conv_left_weight, 0, 1, 1, FSMN_VAD_PROJ_DIM)?;
+        let out = x_per.add(&y_left)?;
+        let out = out.permute((0, 3, 2, 1))?.squeeze(1)?; // [B, T, 128]
+        let out = self.affine.forward(&out)?.relu()?; // [B, T, 250]
+        Ok((out, new_cache))
+    }
+}
 
 struct FsmnVadModel {
-    model: candle_onnx::onnx::ModelProto,
     frontend: WavFrontend,
-    cache0: Tensor,
-    cache1: Tensor,
-    cache2: Tensor,
-    cache3: Tensor,
+    in_linear1: Linear,
+    in_linear2: Linear,
+    fsmn_blocks: Vec<FsmnVadBlock>,
+    out_linear1: Linear,
+    out_linear2: Linear,
+    caches: Vec<Tensor>,
 }
 
 impl std::fmt::Debug for FsmnVadModel {
@@ -26,13 +73,15 @@ impl std::fmt::Debug for FsmnVadModel {
 impl FsmnVadModel {
     fn new(config: &VadConfig) -> Result<Self, Box<dyn std::error::Error>> {
         if config.sample_rate != 16000 {
-            return Err(std::io::Error::other("FSMN-VAD currently supports 16k sample rate").into());
+            return Err(
+                std::io::Error::other("FSMN-VAD currently supports 16k sample rate").into(),
+            );
         }
 
         let api = Api::new()?;
         let repo = api.model(FSMN_VAD_REPO.to_owned());
-        let model_path = repo.get("model.onnx")?;
-        let cmvn_path = repo.get("vad.mvn")?;
+        let model_path = repo.get("model.pt")?;
+        let cmvn_path = repo.get("am.mvn")?;
 
         let frontend = WavFrontend::new(WavFrontendConfig {
             sample_rate: config.sample_rate as i32,
@@ -42,16 +91,33 @@ impl FsmnVadModel {
             ..Default::default()
         })?;
 
-        let model = candle_onnx::read_file(model_path)?;
-        let cache = Tensor::zeros((1usize, 128usize, 19usize, 1usize), DType::F32, &Device::Cpu)?;
+        let vb = VarBuilder::from_pth(model_path, DType::F32, &Device::Cpu)?;
+        let encoder_vb = vb.pp("encoder");
+        let in_linear1 = linear(400, 140, encoder_vb.pp("in_linear1").pp("linear"))?;
+        let in_linear2 = linear(140, 250, encoder_vb.pp("in_linear2").pp("linear"))?;
+        let out_linear1 = linear(250, 140, encoder_vb.pp("out_linear1").pp("linear"))?;
+        let out_linear2 = linear(140, 248, encoder_vb.pp("out_linear2").pp("linear"))?;
+
+        let mut fsmn_blocks = Vec::with_capacity(FSMN_VAD_LAYERS);
+        for i in 0..FSMN_VAD_LAYERS {
+            fsmn_blocks.push(FsmnVadBlock::new(encoder_vb.pp("fsmn").pp(i))?);
+        }
+
+        let cache = Tensor::zeros(
+            (1usize, FSMN_VAD_PROJ_DIM, FSMN_VAD_CACHE_FRAMES, 1usize),
+            DType::F32,
+            &Device::Cpu,
+        )?;
+        let caches = vec![cache; FSMN_VAD_LAYERS];
 
         Ok(Self {
-            model,
             frontend,
-            cache0: cache.clone(),
-            cache1: cache.clone(),
-            cache2: cache.clone(),
-            cache3: cache,
+            in_linear1,
+            in_linear2,
+            fsmn_blocks,
+            out_linear1,
+            out_linear2,
+            caches,
         })
     }
 
@@ -75,30 +141,17 @@ impl FsmnVadModel {
             &Device::Cpu,
         )?;
 
-        let mut inputs = HashMap::new();
-        inputs.insert("speech".to_string(), speech);
-        inputs.insert("in_cache0".to_string(), self.cache0.clone());
-        inputs.insert("in_cache1".to_string(), self.cache1.clone());
-        inputs.insert("in_cache2".to_string(), self.cache2.clone());
-        inputs.insert("in_cache3".to_string(), self.cache3.clone());
-
-        let mut outputs = candle_onnx::simple_eval(&self.model, inputs)?;
-        self.cache0 = outputs
-            .remove("out_cache0")
-            .ok_or_else(|| std::io::Error::other("Missing out_cache0 from FSMN-VAD output"))?;
-        self.cache1 = outputs
-            .remove("out_cache1")
-            .ok_or_else(|| std::io::Error::other("Missing out_cache1 from FSMN-VAD output"))?;
-        self.cache2 = outputs
-            .remove("out_cache2")
-            .ok_or_else(|| std::io::Error::other("Missing out_cache2 from FSMN-VAD output"))?;
-        self.cache3 = outputs
-            .remove("out_cache3")
-            .ok_or_else(|| std::io::Error::other("Missing out_cache3 from FSMN-VAD output"))?;
-
-        let logits = outputs
-            .remove("logits")
-            .ok_or_else(|| std::io::Error::other("Missing logits from FSMN-VAD output"))?;
+        let mut x = self.in_linear1.forward(&speech)?;
+        x = self.in_linear2.forward(&x)?;
+        x = x.relu()?;
+        for (idx, block) in self.fsmn_blocks.iter().enumerate() {
+            let (new_x, new_cache) = block.forward(&x, &self.caches[idx])?;
+            x = new_x;
+            self.caches[idx] = new_cache;
+        }
+        x = self.out_linear1.forward(&x)?;
+        x = self.out_linear2.forward(&x)?;
+        let logits = softmax_last_dim(&x)?;
 
         let dims = logits.dims();
         if dims.len() != 3 || dims[0] != 1 || dims[2] == 0 {
@@ -129,11 +182,11 @@ impl FsmnVadModel {
 
 #[derive(Debug, Clone, Copy)]
 pub struct VadConfig {
-    pub sample_rate: u32,            // 採樣率，例如 16000 Hz
-    pub speech_threshold: f32,       // 語音概率閾值，例如 0.5
-    pub silence_duration_ms: u32,    // 靜音持續時間（毫秒），例如 500 ms
-    pub max_speech_duration_ms: u32, // 最大語音段長（毫秒），例如 10000 ms
-    pub rollback_duration_ms: u32,   // 剪斷後回退時間（毫秒），例如 200 ms
+    pub sample_rate: u32,                     // 採樣率，例如 16000 Hz
+    pub speech_threshold: f32,                // 語音概率閾值，例如 0.5
+    pub silence_duration_ms: u32,             // 靜音持續時間（毫秒），例如 500 ms
+    pub max_speech_duration_ms: u32,          // 最大語音段長（毫秒），例如 10000 ms
+    pub rollback_duration_ms: u32,            // 剪斷後回退時間（毫秒），例如 200 ms
     pub min_speech_duration_ms: u32, // 最小語音段長（毫秒），小於此長度視為噪音，例如 250 ms
     pub notify_silence_after_ms: Option<u32>, // 如果處於等待狀態超過此時間，發出靜音通知
 }
@@ -214,7 +267,8 @@ impl VadProcessor {
                 self.history_buffer.extend(chunk.iter().copied());
 
                 let rollback_samples = ((self.config.rollback_duration_ms as f32 / 1000.0)
-                    * self.config.sample_rate as f32) as usize;
+                    * self.config.sample_rate as f32)
+                    as usize;
                 while self.history_buffer.len() > rollback_samples {
                     self.history_buffer.pop_front();
                 }
