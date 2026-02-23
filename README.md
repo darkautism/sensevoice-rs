@@ -1,18 +1,23 @@
+<div align="center">
+
 <picture>
    <source media="(prefers-color-scheme: dark)" srcset="doc/images/header-dark.png" width="100%" height="auto">
    <img alt="Logo for SenseVoiceSmall Rust" src="doc/images/header-light.png" width="100%" height="auto">
 </picture>
 
-# SenseVoiceSmall [![dependency status](https://deps.rs/repo/github/darkautism/sensevoice-rs/status.svg)](https://deps.rs/repo/github/darkautism/sensevoice-rs)
+# SenseVoiceSmall 
 
 A Pure Rust speech recognition library, using Candle for the non-RKNN runtime and RKNN for Rockchip NPU runtime.
 
+[![dependency status](https://deps.rs/repo/github/darkautism/sensevoice-rs/status.svg)](https://deps.rs/repo/github/darkautism/sensevoice-rs)
 [![][release-shield]][release-link]
 [![][github-stars-shield]][github-stars-link]
 [![][github-issues-shield]][github-issues-shield-link]
 [![][github-contributors-shield]][github-contributors-link]
 [![][license-shield]][license-shield-link]
 [![][last-commit-shield]][last-commit-shield-link]
+
+</div>
 
 ## Rockchip Installation Only
 
