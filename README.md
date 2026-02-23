@@ -7,6 +7,13 @@
 
 A Pure Rust speech recognition library, using Candle for the non-RKNN runtime and RKNN for Rockchip NPU runtime.
 
+[![][release-shield]][release-link]
+[![][github-stars-shield]][github-stars-link]
+[![][github-issues-shield]][github-issues-shield-link]
+[![][github-contributors-shield]][github-contributors-link]
+[![][license-shield]][license-shield-link]
+[![][last-commit-shield]][last-commit-shield-link]
+
 ## Rockchip Installation Only
 
 You need to install `rknn.so` first:
