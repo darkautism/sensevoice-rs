@@ -1,6 +1,6 @@
 <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="doc/images/header-dark.png">
-   <img alt="Logo for SenseVoiceSmall Rust" src="doc/images/header-light.png">
+   <source media="(prefers-color-scheme: dark)" srcset="doc/images/header-dark.png" width="100%" height="auto">
+   <img alt="Logo for SenseVoiceSmall Rust" src="doc/images/header-light.png" width="100%" height="auto">
 </picture>
 
 # SenseVoiceSmall [![dependency status](https://deps.rs/repo/github/darkautism/sensevoice-rs/status.svg)](https://deps.rs/repo/github/darkautism/sensevoice-rs)
