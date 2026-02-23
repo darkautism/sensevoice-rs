@@ -85,3 +85,20 @@ VoiceText { language: Zh, emotion: Neutral, event: Bgm, punctuation_normalizatio
 VoiceText { language: En, emotion: Unknown, event: Bgm, punctuation_normalization: Woitn, content: "" }
 
 ```
+
+
+
+<!-- Link Definitions -->
+
+[release-shield]: https://img.shields.io/github/v/release/darkautism/sensevoice-rs?color=369eff&labelColor=black&logo=github&style=flat-square
+[release-link]: https://github.com/darkautism/sensevoice-rs/releases
+[license-shield]: https://img.shields.io/badge/license-apache%202.0-white?labelColor=black&style=flat-square
+[license-shield-link]: https://github.com/darkautism/sensevoice-rs/blob/main/LICENSE
+[last-commit-shield]: https://img.shields.io/github/last-commit/darkautism/sensevoice-rs?color=c4f042&labelColor=black&style=flat-square
+[last-commit-shield-link]: https://github.com/darkautism/sensevoice-rs/commits/main
+[github-stars-shield]: https://img.shields.io/github/stars/darkautism/sensevoice-rs?labelColor&style=flat-square&color=ffcb47
+[github-stars-link]: https://github.com/darkautism/sensevoice-rs
+[github-issues-shield]: https://img.shields.io/github/issues/darkautism/sensevoice-rs?labelColor=black&style=flat-square&color=ff80eb
+[github-issues-shield-link]: https://github.com/darkautism/sensevoice-rs/issues
+[github-contributors-shield]: https://img.shields.io/github/contributors/darkautism/sensevoice-rs?color=c4f042&labelColor=black&style=flat-square
+[github-contributors-link]: https://github.com/darkautism/sensevoice-rs/graphs/contributors
