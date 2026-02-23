@@ -1,3 +1,8 @@
+<picture>
+   <source media="(prefers-color-scheme: dark)" srcset="doc/images/header-dark.png">
+   <img alt="Logo for SenseVoiceSmall Rust" src="doc/images/header-light.png">
+</picture>
+
 # SenseVoiceSmall [![dependency status](https://deps.rs/repo/github/darkautism/sensevoice-rs/status.svg)](https://deps.rs/repo/github/darkautism/sensevoice-rs)
 
 A Pure Rust speech recognition library, using Candle for the non-RKNN runtime and RKNN for Rockchip NPU runtime.
