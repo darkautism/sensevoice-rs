@@ -8,7 +8,7 @@ license = "MIT"
 
 [dependencies]
 kaldi-fbank-rust-kautism = "0.1.0"
-rknn-rs = { version = "0.2.1", optional = true }
+rknn-rs = { version = "0.2.4", optional = true }
 hound = "3.5.1"
 ndarray = { version="0.17.2", features=["rayon"]}
 ndarray-npy = "0.10.0"
