@@ -1,0 +1,52 @@
+name: Dependency refresh verification
+
+on:
+  push:
+    branches: [ "deps/refresh-2026-09" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  refresh-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: deps/refresh-2026-09
+
+      - name: Resolve lockfile
+        run: cargo generate-lockfile
+
+      - name: Commit resolved lockfile
+        shell: bash
+        run: |
+          if ! git diff --quiet -- Cargo.lock; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add Cargo.lock
+            git commit -m "deps: refresh Cargo.lock"
+            git push origin HEAD:deps/refresh-2026-09
+          fi
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Build
+        run: cargo build --verbose
+
+      - name: Test
+        run: cargo test --verbose
+
+      - name: Check without default features
+        run: cargo check --no-default-features --verbose
+
+      - name: Check stream feature
+        run: cargo check --no-default-features --features stream --verbose
+
+      - name: Docs
+        run: cargo doc --no-deps --verbose
