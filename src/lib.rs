@@ -7,7 +7,7 @@ use core::fmt;
 #[cfg(feature = "rknpu")]
 use std::{fs::File, io::BufReader};
 
-use hf_hub::api::sync::Api;
+use hf_hub::{split_id, HFClientSync};
 use hound::WavReader;
 #[cfg(feature = "rknpu")]
 use ndarray::Axis;
@@ -360,14 +360,15 @@ impl SenseVoiceSmall {
             // RKNN Path
             let model_path = "happyme531/SenseVoiceSmall-RKNN2";
 
-            let api = Api::new().unwrap();
-            let repo = api.model(model_path.to_string());
+            let api = HFClientSync::new()?;
+            let (owner, name) = split_id(model_path);
+            let repo = api.model(owner, name);
 
             // FSMN VAD files removed
-            let embedding_path = repo.get("embedding.npy")?;
-            let rknn_path = repo.get("sense-voice-encoder.rknn")?;
-            let sentence_path = repo.get("chn_jpn_yue_eng_ko_spectok.bpe.model")?;
-            let am_path = repo.get("am.mvn")?;
+            let embedding_path = repo.download_file().filename("embedding.npy").send()?;
+            let rknn_path = repo.download_file().filename("sense-voice-encoder.rknn").send()?;
+            let sentence_path = repo.download_file().filename("chn_jpn_yue_eng_ko_spectok.bpe.model").send()?;
+            let am_path = repo.download_file().filename("am.mvn").send()?;
 
             let config = SenseVoiceConfig {
                 model_path: rknn_path,
@@ -428,13 +429,13 @@ impl SenseVoiceSmall {
     pub fn init_official_model_pt(
         vadconfig: VadConfig,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let api = Api::new().unwrap();
-        let repo = api.model("FunAudioLLM/SenseVoiceSmall".to_owned());
+        let api = HFClientSync::new()?;
+        let repo = api.model("FunAudioLLM", "SenseVoiceSmall");
 
         let config = SenseVoiceConfig {
-            model_path: repo.get("model.pt")?,
-            tokenizer_path: repo.get("chn_jpn_yue_eng_ko_spectok.bpe.model")?,
-            cmvn_path: Some(repo.get("am.mvn")?),
+            model_path: repo.download_file().filename("model.pt").send()?,
+            tokenizer_path: repo.download_file().filename("chn_jpn_yue_eng_ko_spectok.bpe.model").send()?,
+            cmvn_path: Some(repo.download_file().filename("am.mvn").send()?),
         };
 
         Self::init_with_config(config, vadconfig)
