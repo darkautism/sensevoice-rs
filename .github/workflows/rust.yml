@@ -8,6 +8,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Work around missing <cstdint> in kaldi-fbank-rust-kautism 0.1.0
+  CXXFLAGS: "-include cstdint"
 
 jobs:
   build:
