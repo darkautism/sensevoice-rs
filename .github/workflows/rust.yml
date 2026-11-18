@@ -12,7 +12,18 @@ env:
   CXXFLAGS: "-include cstdint"
 
 jobs:
+  lock-export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Resolve Cargo.lock on current master
+        run: |
+          cargo metadata --format-version 1 > /dev/null
+          echo "-----BEGIN-GENERATED-CARGO-LOCK-----"
+          cat Cargo.lock
+          echo "-----END-GENERATED-CARGO-LOCK-----"
   build:
+    if: github.event_name == 'workflow_dispatch'
 
     runs-on: ubuntu-latest
 
