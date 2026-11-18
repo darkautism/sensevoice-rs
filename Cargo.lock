@@ -2429,9 +2429,9 @@ dependencies = [
 
 [[package]]
 name = "sentencepiece"
-version = "0.13.2"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72b4acae174264aca67dbd9e15abe7d8ace549e7ccd0beed67fd6e40e4a8f74d"
+checksum = "199cd424616675812f71a43866e2fb6e4725538dd7cee7d537fea81c0d66c102"
 dependencies = [
  "libc",
  "num-derive",
@@ -2444,9 +2444,9 @@ dependencies = [
 
 [[package]]
 name = "sentencepiece-sys"
-version = "0.13.2"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e82929ac577ec9b374cf0fc1320224c4ed41e3905f22fd4fc80be97ef4f8662b"
+checksum = "1f4f7b039e2b80f69283f56211f9457ea3f4a8d3045b9ba4282326b446fa3a9a"
 dependencies = [
  "cc",
  "cmake",
