@@ -1,5 +1,5 @@
 use futures::stream::StreamExt;
-use hf_hub::api::sync::Api;
+use hf_hub::HFClientSync;
 use sensevoice_rs::{silero_vad::VadConfig, SenseVoiceSmall};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -95,9 +95,9 @@ fn reader_to_stream(mut reader: DelayedReader) -> impl Stream<Item = Vec<i16>> {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut svs = SenseVoiceSmall::init(VadConfig::default())?;
 
-    let api = Api::new().unwrap();
-    let repo = api.model("happyme531/SenseVoiceSmall-RKNN2".to_owned());
-    let wav_path = repo.get("output.wav")?;
+    let api = HFClientSync::new()?;
+    let repo = api.model("happyme531", "SenseVoiceSmall-RKNN2");
+    let wav_path = repo.download_file().filename("output.wav").send()?;
     let file_for_stream = File::open(&wav_path)?;
     let delayed_reader = DelayedReader::new(file_for_stream, 1024, Duration::from_millis(50)); // Faster delay
 

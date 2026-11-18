@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use candle::{DType, Device, Tensor};
 use candle_nn::{linear, linear_no_bias, ops::softmax_last_dim, Linear, Module, VarBuilder};
-use hf_hub::api::sync::Api;
+use hf_hub::{split_id, HFClientSync};
 
 use crate::wavfrontend::{WavFrontend, WavFrontendConfig};
 
@@ -78,10 +78,11 @@ impl FsmnVadModel {
             );
         }
 
-        let api = Api::new()?;
-        let repo = api.model(FSMN_VAD_REPO.to_owned());
-        let model_path = repo.get("model.pt")?;
-        let cmvn_path = repo.get("am.mvn")?;
+        let api = HFClientSync::new()?;
+        let (owner, name) = split_id(FSMN_VAD_REPO);
+        let repo = api.model(owner, name);
+        let model_path = repo.download_file().filename("model.pt").send()?;
+        let cmvn_path = repo.download_file().filename("am.mvn").send()?;
 
         let frontend = WavFrontend::new(WavFrontendConfig {
             sample_rate: config.sample_rate as i32,
