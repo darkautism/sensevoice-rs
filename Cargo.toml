@@ -12,7 +12,7 @@ rknn-rs = { version = "0.2.1", optional = true }
 hound = "3.5.1"
 ndarray = { version="0.17.2", features=["rayon"]}
 ndarray-npy = "0.10.0"
-sentencepiece = "0.13.1"
+sentencepiece = "0.14.0"
 ndarray-stats = "0.7.0"
 rayon = "1.12.0"
 hf-hub = "0.5.0"
