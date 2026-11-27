@@ -8,6 +8,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Work around missing <cstdint> in kaldi-fbank-rust-kautism 0.1.0
+  CXXFLAGS: "-include cstdint"
 
 jobs:
   build:
@@ -15,10 +17,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@v6
     - name: RustDoc
-      run: cargo doc --verbose
+      run: cargo doc --locked --verbose
     - name: fmt
       run: cargo fmt --verbose
     - name: Build
-      run: cargo build --verbose
+      run: cargo build --locked --verbose
